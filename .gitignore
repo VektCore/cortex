@@ -1,8 +1,10 @@
-# Binaries
+# Binaries. Anchored to the repository root on purpose: an unanchored "cortex"
+# also matches the cmd/cortex/ directory, which silently kept the program's
+# entrypoint out of the published repository.
 /bin/
 /dist/
-cortex
-cortex.exe
+/cortex
+/cortex.exe
 
 # Test artifacts
 *.out
@@ -11,7 +13,9 @@ coverage.*
 .cortex/cache/
 .cortex/baseline.sarif
 results/
-*.sarif
+# Scan output, not the golden files the SARIF codec is tested against.
+/results/*.sarif
+bench/**/*.sarif
 
 # IDE
 .idea/

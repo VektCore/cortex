@@ -1,0 +1,118 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "semgrep",
+          "version": "1.60.0",
+          "informationUri": "https://semgrep.dev",
+          "rules": [
+            {
+              "id": "python.sqlalchemy.security.sqli-detected.sqli-detected",
+              "name": "sqli-detected",
+              "shortDescription": {
+                "text": "SQL injection via format string"
+              },
+              "properties": {
+                "tags": ["CWE-89", "OWASP A03:2021-Injection"],
+                "security-severity": "9.8"
+              }
+            },
+            {
+              "id": "python.lang.security.audit.hardcoded-password.hardcoded-password",
+              "name": "hardcoded-password",
+              "shortDescription": {
+                "text": "Hardcoded password in source code"
+              },
+              "properties": {
+                "tags": ["CWE-798"],
+                "security-severity": "7.5"
+              }
+            },
+            {
+              "id": "python.lang.security.audit.eval.eval-detected",
+              "name": "eval-detected",
+              "shortDescription": {
+                "text": "Use of eval() on user input"
+              },
+              "properties": {
+                "tags": ["CWE-78"],
+                "security-severity": "5.0"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "python.sqlalchemy.security.sqli-detected.sqli-detected",
+          "message": {
+            "text": "Detected possible SQL injection via format string. Use parameterized queries instead."
+          },
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/models.py"
+                },
+                "region": {
+                  "startLine": 42,
+                  "startColumn": 12,
+                  "endLine": 42,
+                  "endColumn": 65
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "python.lang.security.audit.hardcoded-password.hardcoded-password",
+          "message": {
+            "text": "Hardcoded password string detected."
+          },
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/config.py"
+                },
+                "region": {
+                  "startLine": 10,
+                  "startColumn": 1,
+                  "endLine": 10,
+                  "endColumn": 30
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "python.lang.security.audit.eval.eval-detected",
+          "message": {
+            "text": "eval() called on user-controlled input."
+          },
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/views.py"
+                },
+                "region": {
+                  "startLine": 87,
+                  "startColumn": 5,
+                  "endLine": 87,
+                  "endColumn": 30
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

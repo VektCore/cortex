@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "gosec",
+          "rules": [
+            {
+              "id": "G404",
+              "name": "G404",
+              "defaultConfiguration": { "level": "warning" },
+              "shortDescription": { "text": "Use of weak random number generator" }
+            }
+          ]
+        }
+      },
+      "taxonomies": [
+        {
+          "name": "CWE",
+          "version": "4.4",
+          "releaseDateUtc": "2021-03-15",
+          "guid": "f2856fc0-85b7-373f-83e7-6f8582243547",
+          "taxa": [
+            { "id": "338", "name": "CWE-338" }
+          ]
+        }
+      ],
+      "results": [
+        {
+          "ruleId": "G404",
+          "level": "warning",
+          "message": { "text": "Use of weak random number generator (math/rand)" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "internal/token/token.go" },
+                "region": { "startLine": 42, "endLine": 42 }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

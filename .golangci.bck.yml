@@ -1,0 +1,126 @@
+# Cortex linting policy — strict, enforces Clean Architecture + FP discipline.
+run:
+  timeout: 5m
+  go: "1.22"
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    # Correctness
+    - govet
+    - errcheck
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosimple
+    - typecheck
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    - nilerr
+    - nilnil
+    - errorlint
+
+    # Style
+    - gofmt
+    - goimports
+    - gci
+    - misspell
+    - whitespace
+    - revive
+    - stylecheck
+    - unconvert
+    - unparam
+    - prealloc
+
+    # Complexity (keep things small)
+    - gocyclo
+    - gocognit
+    - funlen
+    - nestif
+    - dupl
+
+    # Security
+    - gosec
+
+    # FP discipline + architectural guards
+    - exhaustive       # exhaustive switches on sum types
+    - forbidigo        # forbid panic/print in production code
+    - depguard         # enforce dependency rules between layers
+    - copyloopvar
+    - nolintlint
+
+linters-settings:
+  gocyclo:
+    min-complexity: 12
+  gocognit:
+    min-complexity: 18
+  funlen:
+    lines: 80
+    statements: 50
+
+  gci:
+    sections:
+      - standard
+      - default
+      - prefix(github.com/vektcore/cortex)
+
+  forbidigo:
+    forbid:
+      - p: ^fmt\.Print.*$
+        msg: "use the logger; fmt.Print is reserved for CLI output layer"
+      - p: ^panic\(.*\)$
+        msg: "do not panic; return a Result/error"
+
+  depguard:
+    rules:
+      # Domain layer must be pure: no imports from application/infrastructure.
+      domain-purity:
+        files:
+          - "**/internal/domain/**"
+        deny:
+          - pkg: "github.com/vektcore/cortex/internal/application"
+            desc: "domain must not depend on application"
+          - pkg: "github.com/vektcore/cortex/internal/infrastructure"
+            desc: "domain must not depend on infrastructure"
+          - pkg: "github.com/vektcore/cortex/internal/interfaces"
+            desc: "domain must not depend on interfaces"
+          - pkg: "net/http"
+            desc: "no I/O in domain"
+          - pkg: "os"
+            desc: "no I/O in domain (except for errors via stdlib types)"
+          - pkg: "database/sql"
+            desc: "no persistence in domain"
+
+      # Application layer may depend on domain, but never on infrastructure directly.
+      application-purity:
+        files:
+          - "**/internal/application/**"
+        deny:
+          - pkg: "github.com/vektcore/cortex/internal/infrastructure"
+            desc: "application talks to infrastructure via ports, not direct imports"
+          - pkg: "github.com/vektcore/cortex/internal/interfaces"
+            desc: "application must not depend on interfaces"
+
+  revive:
+    severity: warning
+    rules:
+      - name: exported
+      - name: var-naming
+      - name: unused-parameter
+      - name: early-return
+      - name: indent-error-flow
+      - name: empty-block
+      - name: superfluous-else
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters: [funlen, gocyclo, gocognit, dupl, gosec]
+    - path: cmd/
+      linters: [forbidigo]   # CLI may print to stdout
+    - path: internal/interfaces/cli/
+      linters: [forbidigo]
+  max-issues-per-linter: 0
+  max-same-issues: 0
