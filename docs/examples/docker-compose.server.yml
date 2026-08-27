@@ -39,6 +39,8 @@ services:
       - CORTEX_GIT_TOKEN=${CORTEX_GIT_TOKEN:-}
       # Client API keys, referenced from server.yaml as ${CLIENT_ACME_KEY}.
       - CLIENT_ACME_KEY=${CLIENT_ACME_KEY:?set CLIENT_ACME_KEY in .env}
+      # Shared secret for GitHub push webhooks (openssl rand -hex 32).
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
       # Semgrep's "auto" ruleset phones home to resolve rules; named rulesets
       # (what the shipped configs use) do not need this, and turning metrics off
       # keeps a client's project metadata to yourself.

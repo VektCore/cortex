@@ -90,6 +90,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/analyses/", s.handleAnalysisByID)
 	s.mux.HandleFunc("/api/v1/scans", s.handleIngestScan)
 	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectState)
+	s.mux.HandleFunc(webhookPath, s.handleGitHubWebhook)
 }
 
 // ---------- health ----------
@@ -142,7 +143,7 @@ func (s *Server) createAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 
 	analysis := Analysis{
-		ID:          bootstrap.RandomIDGen{}.NewScanID().String(),
+		ID:          RandomID(),
 		Project:     req.Project,
 		Repository:  req.Repository,
 		Ref:         strings.TrimSpace(req.Ref),
@@ -260,7 +261,7 @@ func (s *Server) handleIngestScan(w http.ResponseWriter, r *http.Request) {
 
 	id := strings.TrimSpace(r.Header.Get("X-Scan-ID"))
 	if id == "" {
-		id = bootstrap.RandomIDGen{}.NewScanID().String()
+		id = RandomID()
 	}
 	id = sanitizeSegment(id)
 
@@ -391,3 +392,6 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func logField(key, value string) ports.Field { return ports.F(key, value) }
+
+// RandomID is the identifier scheme analyses and ingested scans share.
+func RandomID() string { return bootstrap.RandomIDGen{}.NewScanID().String() }

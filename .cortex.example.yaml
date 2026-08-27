@@ -111,6 +111,11 @@ server:
   #
   # With no keys the server refuses to start: it can clone repositories, so an
   # unauthenticated instance is not a sensible default.
+  #
+  # GitHub push webhooks authenticate with a signature instead of a key, because
+  # GitHub cannot send one. Empty keeps that endpoint closed.
+  webhook_secret: ""
+  webhook_branches: []      # empty: the repository's own default branch
 
 # ---------------------------------------------------------------------------
 # Reachability

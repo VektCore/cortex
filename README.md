@@ -213,6 +213,7 @@ cannot pass for a clean one.
 | `GET /api/v1/analyses` | list, newest first, `?project=` and `?limit=` |
 | `GET /api/v1/analyses/{id}` | status, gate verdict, what changed |
 | `GET /api/v1/analyses/{id}/sarif` | the findings, as SARIF |
+| `POST /api/v1/webhooks/github` | GitHub push webhook: scan on every push |
 | `POST /api/v1/scans` | ingest SARIF from a client's own CI |
 | `GET`/`PUT /api/v1/projects/{p}/vulnerabilities` | the tracked state |
 | `GET /healthz` | liveness, unauthenticated |
@@ -226,6 +227,30 @@ never logged, and never echoed in an error — each analysis records the client'
 Credentials for private repositories live on the server (`CORTEX_GIT_TOKEN`,
 `GITHUB_TOKEN`, `GITLAB_TOKEN`, or an SSH agent), so clients never send tokens
 over the API.
+
+### Connecting a repository: nothing installed in it
+
+A repository is connected by pointing its push webhook at the server. No
+workflow, no config file, no scanners on their side — the server clones the
+repository itself.
+
+In the repository's **Settings → Webhooks → Add webhook**:
+
+| Field | Value |
+|---|---|
+| Payload URL | `https://sast.example.com/api/v1/webhooks/github` |
+| Content type | `application/json` |
+| Secret | the value of `server.webhook_secret` |
+| Events | Just the push event |
+
+The endpoint authenticates with GitHub's HMAC signature over the body rather
+than an API key, because GitHub cannot send a bearer token. **With no secret
+configured the endpoint stays closed**: an unauthenticated webhook lets anyone
+who finds the URL make the server clone repositories on demand.
+
+Only the branch of record is analysed — the repository's default branch, or the
+list in `server.webhook_branches`. Analysing every feature branch multiplies the
+work without changing the number anybody looks at.
 
 Deploy it with [`docs/examples/docker-compose.server.yml`](docs/examples/docker-compose.server.yml)
 and [`docs/examples/server.yaml`](docs/examples/server.yaml). Put a TLS-terminating

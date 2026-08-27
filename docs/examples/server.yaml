@@ -24,6 +24,14 @@ server:
     # - name: globex
     #   key: ${CLIENT_GLOBEX_KEY}
 
+  # Shared secret for GitHub push webhooks. Connecting a repository is then just
+  # pasting the URL and this secret into its Settings → Webhooks — nothing is
+  # installed in the repository. Empty keeps the endpoint closed.
+  webhook_secret: ${GITHUB_WEBHOOK_SECRET}
+  # Which branches a push triggers an analysis for. Empty means the
+  # repository's own default branch.
+  webhook_branches: []
+
 # Third-party code is not what the client is paying to have reviewed.
 exclude:
   - node_modules/

@@ -3,6 +3,7 @@ package sarif
 import (
 	"bytes"
 	"fmt"
+	"strings"
 
 	gosarif "github.com/owenrumney/go-sarif/v2/sarif"
 
@@ -40,7 +41,10 @@ func writeBytes(findings []finding.Finding, meta ports.SarifMetadata) ([]byte, e
 
 		if !rulesSeen[ruleID] {
 			rulesSeen[ruleID] = true
-			rule := gosarif.NewRule(ruleID)
+			// The bindings declare ShortDescription without omitempty, so an
+			// unset one serialises as null — and GitHub Code Scanning rejects
+			// the whole document over it, not just that rule.
+			rule := gosarif.NewRule(ruleID).WithDescription(shortDescription(f))
 			// The rule-level score is what GitHub Code Scanning reads; the
 			// result-level one above is what Cortex reads back.
 			props := gosarif.Properties{
@@ -132,4 +136,23 @@ func severityToSARIFLevel(s shared.Severity) string {
 	default:
 		return "none"
 	}
+}
+
+// shortDescription is the one-line summary Code Scanning shows for a rule.
+// Scanners rarely give Cortex a rule description, so the finding's own message
+// is the best text available: its first sentence, kept to one line.
+func shortDescription(f finding.Finding) string {
+	text := strings.TrimSpace(f.Message().String())
+	if cut := strings.IndexAny(text, ".\n"); cut > 0 {
+		text = text[:cut]
+	}
+
+	const maxRunes = 120
+	if runes := []rune(text); len(runes) > maxRunes {
+		text = strings.TrimSpace(string(runes[:maxRunes])) + "…"
+	}
+	if text == "" {
+		return f.RuleID().String()
+	}
+	return text
 }

@@ -232,3 +232,62 @@ func TestCodec_Parse_TaxonomyWithDateOnlyTimestamp(t *testing.T) {
 	assert.Equal(t, "G404", findings[0].RuleID().String())
 	assert.Equal(t, "internal/token/token.go", findings[0].Location().File())
 }
+
+// GitHub Code Scanning validates the document strictly and rejects the whole
+// upload when a rule's shortDescription is null — which is what the bindings
+// serialise when it is left unset, because the field carries no omitempty.
+func TestCodec_Write_RulesCarryAShortDescription(t *testing.T) {
+	t.Parallel()
+
+	findings := []finding.Finding{
+		mkFindingWithMessage(t,
+			"Possible SQL injection vector through string-based query construction. Review it."),
+	}
+
+	raw, err := infrasarif.New().Write(findings, ports.SarifMetadata{Tool: "cortex"}).Get()
+	require.NoError(t, err)
+
+	var doc struct {
+		Runs []struct {
+			Tool struct {
+				Driver struct {
+					Rules []struct {
+						ID               string `json:"id"`
+						ShortDescription *struct {
+							Text string `json:"text"`
+						} `json:"shortDescription"`
+					} `json:"rules"`
+				} `json:"driver"`
+			} `json:"tool"`
+		} `json:"runs"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	require.NotEmpty(t, doc.Runs[0].Tool.Driver.Rules)
+
+	rule := doc.Runs[0].Tool.Driver.Rules[0]
+	require.NotNil(t, rule.ShortDescription,
+		"a null shortDescription makes Code Scanning reject the entire document")
+	assert.Equal(t, "Possible SQL injection vector through string-based query construction",
+		rule.ShortDescription.Text,
+		"one sentence, one line — not the whole message")
+}
+
+// mkFindingWithMessage builds a finding whose message drives the rule's
+// shortDescription.
+func mkFindingWithMessage(t *testing.T, message string) finding.Finding {
+	t.Helper()
+
+	loc, err := finding.NewLocation(finding.LocationInput{File: "app/db.py", StartLine: 42}).Get()
+	require.NoError(t, err)
+
+	f, err := finding.New(finding.NewFindingInput{
+		RuleID:   finding.RuleID("B608"),
+		Severity: shared.SeverityHigh,
+		Location: loc,
+		Message:  finding.Message(message),
+		Source:   finding.ScannerName("bandit"),
+		Snippet:  "query = 'SELECT ' + x",
+	}).Get()
+	require.NoError(t, err)
+	return f
+}

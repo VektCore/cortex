@@ -57,7 +57,11 @@ func (a *authenticator) clientFor(token string) (string, bool) {
 // a load balancer cannot be expected to hold a credential.
 func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		// Two paths carry their own authentication, or none by design:
+		// /healthz because a load balancer cannot hold a credential, and the
+		// webhook because GitHub cannot send a bearer token — it signs the
+		// body with a shared secret instead, which the handler verifies.
+		if r.URL.Path == "/healthz" || r.URL.Path == webhookPath {
 			next.ServeHTTP(w, r)
 			return
 		}

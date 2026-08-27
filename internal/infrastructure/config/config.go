@@ -46,6 +46,13 @@ type ServerConfig struct {
 	// APIKeys are the credentials clients authenticate with. Names exist for
 	// the logs: a request is attributed to a client, never to a raw key.
 	APIKeys []APIKey `mapstructure:"api_keys"`
+	// WebhookSecret is the shared secret GitHub signs its deliveries with.
+	// Empty closes the webhook endpoint: an unauthenticated one lets anyone
+	// make this server clone repositories on demand.
+	WebhookSecret string `mapstructure:"webhook_secret"`
+	// WebhookBranches limits which branches a push triggers an analysis for.
+	// Empty means the repository's own default branch (plus main/master).
+	WebhookBranches []string `mapstructure:"webhook_branches"`
 }
 
 // APIKey is one client credential.
