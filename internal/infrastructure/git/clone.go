@@ -81,6 +81,11 @@ func Clone(ctx context.Context, spec CloneSpec) (string, func(), error) {
 	return dir, cleanup, nil
 }
 
+// HasToken reports whether a credential for HTTPS cloning is present in the
+// environment. Callers use it to choose between an HTTPS URL, which the token
+// authenticates, and SSH, which needs a key on disk.
+func HasToken() bool { return firstEnv(TokenEnvVars) != "" }
+
 // IsRemoteURL reports whether target names a remote repository rather than a
 // local path. It accepts scheme URLs, scp-style git addresses, and bare
 // host/org/repo forms for the common forges.

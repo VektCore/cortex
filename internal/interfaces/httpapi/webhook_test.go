@@ -200,10 +200,14 @@ func TestWebhook_ClosedWhenNoSecretIsConfigured(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-// A private repository is cloned over SSH, where a deploy key is the usual
-// arrangement; a public one over HTTPS.
+// With no token configured, a private repository is cloned over SSH — a deploy
+// key is then the arrangement. With one, HTTPS wins, because a single token
+// covers every repository it can read.
 func TestWebhook_PrivateRepositoryIsClonedOverSSH(t *testing.T) {
-	t.Parallel()
+	// Not parallel: it asserts on behaviour driven by the environment.
+	t.Setenv("CORTEX_GIT_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GITLAB_TOKEN", "")
 	h := newWebhookServer(t)
 
 	body := pushBody("master", "acme/private-api", true)
@@ -219,4 +223,23 @@ func TestWebhook_PrivateRepositoryIsClonedOverSSH(t *testing.T) {
 	var analysis httpapi.Analysis
 	require.NoError(t, json.Unmarshal(stored.Body.Bytes(), &analysis))
 	assert.Equal(t, "git@github.com:acme/private-api.git", analysis.Repository)
+}
+
+func TestWebhook_PrivateRepositoryUsesHTTPSWhenATokenExists(t *testing.T) {
+	t.Setenv("CORTEX_GIT_TOKEN", "ghp_a_token")
+	h := newWebhookServer(t)
+
+	body := pushBody("master", "acme/private-api", true)
+	rec := deliver(t, h, "push", body, sign(webhookSecret, body))
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var queued map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &queued))
+
+	stored := do(t, h, http.MethodGet, "/api/v1/analyses/"+queued["id"], "", testKey)
+	var analysis httpapi.Analysis
+	require.NoError(t, json.Unmarshal(stored.Body.Bytes(), &analysis))
+
+	assert.Equal(t, "https://github.com/acme/private-api.git", analysis.Repository,
+		"one token covers every repository; a deploy key would be per repository")
 }

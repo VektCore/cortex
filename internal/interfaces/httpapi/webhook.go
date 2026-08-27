@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	gitinfra "github.com/vektcore/cortex/internal/infrastructure/git"
 )
 
 // webhookPath is excluded from bearer-key auth: the signature is the credential.
@@ -109,7 +111,7 @@ func (s *Server) queuePush(w http.ResponseWriter, r *http.Request, body []byte) 
 	analysis := Analysis{
 		ID:          RandomID(),
 		Project:     sanitizeSegment(strings.ReplaceAll(push.Repository.FullName, "/", "-")),
-		Repository:  cloneURLFor(push),
+		Repository:  cloneURLFor(push, gitinfra.HasToken()),
 		Ref:         branch,
 		Status:      StatusQueued,
 		RequestedBy: "github-webhook",
@@ -180,10 +182,15 @@ func (s *Server) watchedBranch(branch, repoDefault string) bool {
 	return false
 }
 
-// cloneURLFor picks how to reach the repository: SSH for private ones, where a
-// deploy key is the usual arrangement, HTTPS for public ones.
-func cloneURLFor(push pushEvent) string {
-	if push.Repository.Private && push.Repository.SSHURL != "" {
+// cloneURLFor picks how to reach the repository.
+//
+// A public repository needs no credential, so HTTPS. A private one needs
+// whichever the server actually has: HTTPS when a token is configured — one
+// token covers every repository it can read — and SSH otherwise, which means a
+// deploy key per repository. Choosing SSH unconditionally would force key
+// management on an operator who already has a token.
+func cloneURLFor(push pushEvent, hasToken bool) string {
+	if push.Repository.Private && !hasToken && push.Repository.SSHURL != "" {
 		return push.Repository.SSHURL
 	}
 	if push.Repository.CloneURL != "" {
