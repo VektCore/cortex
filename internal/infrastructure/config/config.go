@@ -1,8 +1,10 @@
 package config
 
 import (
-	"errors"
+	"bytes"
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -134,12 +136,35 @@ type IgnoreRule struct {
 	Reason     string `mapstructure:"reason"`
 }
 
+// envReference matches ${VAR} — braces required, so a lone "$" in a rule
+// pattern or a password is left alone.
+var envReference = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnvReferences replaces ${VAR} with the environment's value.
+//
+// Secrets belong in the environment, not in a committed YAML file, and every
+// example config in this repository is written that way (api_key:
+// ${KORVLABS_API_KEY}). Without this, those placeholders were loaded as
+// literals — which meant a server deployed straight from the documented example
+// accepted the string "${CLIENT_ACME_KEY}" as a valid API key.
+//
+// An undefined variable expands to empty rather than staying literal: an empty
+// credential is rejected downstream, a literal one silently authenticates.
+func expandEnvReferences(raw []byte) []byte {
+	return envReference.ReplaceAllFunc(raw, func(match []byte) []byte {
+		name := envReference.FindSubmatch(match)[1]
+		return []byte(os.Getenv(string(name)))
+	})
+}
+
 // Load reads .cortex.yaml at path. Missing file is not an error — defaults
-// are applied. Environment variables with prefix CORTEX_ override config
-// values (dots replaced by underscores, e.g. CORTEX_PUBLISHERS_KORVLABS_URL).
+// are applied.
+//
+// Two ways to keep secrets out of the file: ${VAR} anywhere in a value, and
+// environment variables prefixed with CORTEX_ that override a key by path
+// (dots as underscores, e.g. CORTEX_PUBLISHERS_KORVLABS_URL).
 func Load(path string) (*Config, error) {
 	v := viper.New()
-	v.SetConfigFile(path)
 	v.SetConfigType("yaml")
 	v.SetEnvPrefix("CORTEX")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -147,15 +172,16 @@ func Load(path string) (*Config, error) {
 
 	applyDefaults(v)
 
-	if err := v.ReadInConfig(); err != nil {
-		var notFoundErr viper.ConfigFileNotFoundError
-		if !errors.As(err, &notFoundErr) {
-			// Config file present but unreadable — that IS an error
-			if !isFileNotFoundErr(err) {
-				return nil, fmt.Errorf("read config %q: %w", path, err)
-			}
+	raw, readErr := os.ReadFile(path)
+	switch {
+	case readErr == nil:
+		if err := v.ReadConfig(bytes.NewReader(expandEnvReferences(raw))); err != nil {
+			return nil, fmt.Errorf("read config %q: %w", path, err)
 		}
-		// File not found — use defaults
+	case os.IsNotExist(readErr):
+		// No file: defaults only, which is a supported way to run.
+	default:
+		return nil, fmt.Errorf("read config %q: %w", path, readErr)
 	}
 
 	var cfg Config
@@ -197,15 +223,6 @@ func applyDefaults(v *viper.Viper) {
 		"dist/", "build/", "target/", "__pycache__/", ".git/",
 		"*.min.js", "*.min.css",
 	})
-}
-
-// isFileNotFoundErr detects when viper can't find the config file at all
-// (as opposed to a parse error).
-func isFileNotFoundErr(err error) bool {
-	s := err.Error()
-	return strings.Contains(s, "no such file") ||
-		strings.Contains(s, "cannot find") ||
-		strings.Contains(s, "not found")
 }
 
 // ScannerSettings translates the per-scanner YAML block into the application

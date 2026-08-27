@@ -11,9 +11,10 @@ permissions:
 
 env:
   # The go directive in go.mod stays at 1.22; this is the toolchain CI builds
-  # with. 1.22 itself no longer links runnable binaries on current macOS
-  # runners ("dyld: missing LC_UUID load command").
-  GO_VERSION: "1.23"
+  # with, and it has to keep moving: 1.22 no longer links runnable binaries on
+  # current macOS runners ("dyld: missing LC_UUID"), and govulncheck fails the
+  # build on standard-library CVEs fixed in later releases.
+  GO_VERSION: "1.27"
 
 jobs:
   lint:
@@ -133,10 +134,34 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install scanners
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          OSV_VERSION: "2.5.1"
         run: |
           python -m pip install --upgrade pip
-          pip install semgrep bandit
+          # Bandit has no native SARIF output: without the formatter every one
+          # of its findings is lost, and the contract rows it covers fail.
+          pip install semgrep bandit bandit-sarif-formatter
+
+          npm install -g --no-fund --no-audit \
+            eslint@8 eslint-plugin-security @microsoft/eslint-formatter-sarif
+
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+
+          sudo curl -sSL -o /usr/local/bin/osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+          sudo chmod +x /usr/local/bin/osv-scanner
+
+      - name: Point ESLint at the global plugins
+        run: |
+          echo "CORTEX_ESLINT_PLUGINS_DIR=$(npm root -g)" >> "$GITHUB_ENV"
+          echo "CORTEX_ESLINT_FORMATTER=$(npm root -g)/@microsoft/eslint-formatter-sarif" >> "$GITHUB_ENV"
 
       - name: Build cortex
         run: make build

@@ -1,6 +1,12 @@
 # Deploy Cortex as a service on your own server.
 #
-#   docker compose -f docs/examples/docker-compose.server.yml up -d
+#   ./scripts/deploy-server.sh --domain sast.example.com
+#
+# or by hand, from the repository root (--project-directory makes the relative
+# paths below resolve here rather than next to this file):
+#
+#   docker compose -f docs/examples/docker-compose.server.yml \
+#     --project-directory . up -d
 #
 # Clients then submit repositories with an API key and never install a scanner:
 #
@@ -15,8 +21,12 @@
 services:
   cortex:
     image: ghcr.io/vektcore/cortex:latest
-    # Or build locally until the image is published:
-    # build: { context: ../.., dockerfile: Dockerfile }
+    # Declared alongside the image so both routes work: `pull` uses the
+    # published image, `build` produces the same tag locally — which is what you
+    # need while the GHCR package is private.
+    build:
+      context: .
+      dockerfile: Dockerfile
     command: ["serve", "-c", "/etc/cortex/server.yaml"]
     restart: unless-stopped
 
@@ -25,7 +35,8 @@ services:
       - "127.0.0.1:8080:8080"
 
     volumes:
-      # The server's own config, with the API keys.
+      # The server's own config, with the API keys. Relative to the project
+      # directory: ./server.yaml at the repository root, not next to this file.
       - ./server.yaml:/etc/cortex/server.yaml:ro
       # Analyses, their SARIF and every project's tracked history. Without this
       # volume a redeploy forgets everything and every finding looks new again.

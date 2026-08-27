@@ -129,3 +129,68 @@ scanners:
 	assert.False(t, cfg.Scanners.Semgrep.Enabled)
 	assert.True(t, cfg.Scanners.Bandit.Enabled)
 }
+
+// Secrets belong in the environment, and every example config in this
+// repository is written that way. Before this was implemented the placeholders
+// loaded as literals, so a server deployed from the documented example accepted
+// the string "${CLIENT_ACME_KEY}" as a valid API key.
+func TestLoad_ExpandsEnvironmentReferences(t *testing.T) {
+	t.Setenv("CORTEX_TEST_CLIENT_KEY", "sk-real-value")
+	t.Setenv("CORTEX_TEST_WEBHOOK", "wh-real-value")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cortex.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`version: "1"
+server:
+  api_keys:
+    - name: acme
+      key: ${CORTEX_TEST_CLIENT_KEY}
+  webhook_secret: ${CORTEX_TEST_WEBHOOK}
+publishers:
+  korvlabs:
+    api_key: ${CORTEX_TEST_CLIENT_KEY}
+`), 0o600))
+
+	cfg, err := config.Load(path)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Server.APIKeys, 1)
+	assert.Equal(t, "sk-real-value", cfg.Server.APIKeys[0].Key)
+	assert.Equal(t, "wh-real-value", cfg.Server.WebhookSecret)
+	assert.Equal(t, "sk-real-value", cfg.Publishers.KorvLabs.APIKey)
+}
+
+// An undefined variable must not stay literal: an empty credential is rejected
+// downstream, a literal one silently authenticates.
+func TestLoad_UndefinedReferenceBecomesEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cortex.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`version: "1"
+server:
+  api_keys:
+    - name: acme
+      key: ${DEFINITELY_NOT_SET_ANYWHERE}
+`), 0o600))
+
+	cfg, err := config.Load(path)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Server.APIKeys, 1)
+	assert.Empty(t, cfg.Server.APIKeys[0].Key,
+		"a placeholder that resolves to nothing must not become a usable key")
+}
+
+// A lone "$" is not a reference: rule patterns and passwords contain them.
+func TestLoad_LeavesBareDollarsAlone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cortex.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`version: "1"
+publishers:
+  korvlabs:
+    api_key: "pa$$word-with-dollars"
+`), 0o600))
+
+	cfg, err := config.Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, "pa$$word-with-dollars", cfg.Publishers.KorvLabs.APIKey)
+}
