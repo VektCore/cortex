@@ -1,0 +1,45 @@
+# Scan a repository other than the one running the workflow — Cortex clones it
+# itself, so no checkout step is needed. Useful for a central security repo that
+# sweeps several projects on a schedule.
+
+name: SAST sweep
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "org/repo to scan"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - github.com/my-org/api
+          - github.com/my-org/web
+          - github.com/my-org/mobile
+    steps:
+      - name: Scan ${{ matrix.repo }}
+        env:
+          # A PAT (or GitHub App token) with read access to the private repos.
+          CORTEX_GIT_TOKEN: ${{ secrets.SAST_READ_TOKEN }}
+        run: |
+          docker run --rm \
+            -e CORTEX_GIT_TOKEN \
+            -v "${{ github.workspace }}/results:/results" \
+            ghcr.io/vektcore/cortex:latest \
+            scan "${{ matrix.repo }}" --ref main \
+              -c /etc/cortex/cortex.yaml --output /results
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sarif-${{ strategy.job-index }}
+          path: results/

@@ -1,0 +1,89 @@
+# Configuration for the repository bench (scripts/bench.sh).
+# Kept apart from .cortex.yaml on purpose: this one must run against foreign
+# repositories on any machine, so it carries no absolute paths. ESLint's global
+# plugin and formatter locations come from CORTEX_ESLINT_* , which bench.sh
+# resolves from `npm root -g`.
+#
+# Paths below are relative to the repository root — bench.sh cds there first.
+
+version: "1"
+
+# Third-party code is not what we are testing, and it dwarfs the real findings.
+exclude:
+  - node_modules/
+  - vendor/
+  - .venv/
+  - venv/
+  - target/
+  - dist/
+  - build/
+  - "*.min.js"
+
+severity:
+  escalate:
+    CWE-89: critical      # SQL injection
+    CWE-78: critical      # OS command injection
+    CWE-94: critical      # code injection
+    CWE-502: critical     # insecure deserialization
+
+dedup:
+  # Two tools agreeing is a confidence signal worth seeing while we calibrate.
+  cross_scanner: false
+
+reachability:
+  enabled: true
+  demote: true
+
+scanners:
+  semgrep:
+    enabled: true
+    timeout: 15m          # foreign repos are bigger than the fixture
+    options:
+      # Explicit rulesets rather than "auto": auto refuses to run unless
+      # Semgrep's metrics are enabled (it resolves the ruleset server-side from
+      # project metadata), which is not something to switch on implicitly for
+      # someone's private code. Naming the packs also makes a run reproducible.
+      config: "p/security-audit,p/owasp-top-ten,p/secrets"
+      rules_dir: rules
+  bandit:
+    enabled: true
+  gosec:
+    enabled: true
+  gitleaks:
+    enabled: true
+    options:
+      verify: "false"     # never send someone else's credentials anywhere
+  osv:
+    enabled: true
+  trivy:
+    enabled: false        # opt-in: downloads a vulnerability database
+  eslint_security:
+    enabled: true
+    # plugins_dir / formatter come from CORTEX_ESLINT_PLUGINS_DIR and
+    # CORTEX_ESLINT_FORMATTER, exported by bench.sh.
+  spotbugs:
+    enabled: false        # needs `mvn package` in the target repo
+  security_code_scan:
+    enabled: false        # needs the analyzer wired into the .csproj
+
+gate:
+  rules:
+    - name: no-critical
+      severity: critical
+      threshold: ">=1"
+    - name: few-high
+      severity: high
+      threshold: ">5"
+
+publishers:
+  filesystem:
+    enabled: true
+    output_dir: bench/    # overridden per repository by bench.sh
+  korvlabs:
+    enabled: false
+
+state:
+  enabled: true
+  # Overridden per repository via CORTEX_STATE_PATH so two repos never
+  # reconcile against each other's history.
+  path: bench/state.json

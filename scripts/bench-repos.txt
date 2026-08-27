@@ -1,0 +1,27 @@
+# Repositories the bench scans, one per line:
+#
+#   <url> [ref]
+#
+# Blank lines and #-comments are ignored. All of these are deliberately
+# vulnerable training applications, public and safe to clone — they exist to be
+# scanned. Add your own below; any form `cortex scan` accepts works
+# (github.com/org/repo, https://…/repo.git, git@host:org/repo.git).
+
+# Python — Django training app
+github.com/adeyosemanputra/pygoat
+
+# JavaScript / Node — OWASP training app
+github.com/OWASP/NodeGoat
+
+# Go — Contrast's vulnerability test bench
+github.com/Contrast-Security-OSS/go-test-bench
+
+# Java — small vulnerable webapp (no Maven build needed for Semgrep)
+github.com/psiinon/bodgeit
+
+# C# / .NET — OWASP WebGoat for .NET
+github.com/OWASP/WebGoat.NET
+
+# Larger, slower. Uncomment when you want a heavier run:
+# github.com/juice-shop/juice-shop
+# github.com/WebGoat/WebGoat

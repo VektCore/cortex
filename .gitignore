@@ -1,0 +1,44 @@
+# Binaries
+/bin/
+/dist/
+cortex
+cortex.exe
+
+# Test artifacts
+*.out
+*.test
+coverage.*
+.cortex/cache/
+.cortex/baseline.sarif
+results/
+*.sarif
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Go
+vendor/
+*.prof
+
+# Dependencies that scanners produce
+node_modules/
+__pycache__/
+*.pyc
+target/
+.gradle/
+
+# Repository bench output (scripts/bench.sh)
+bench/
+
+# Mock platform server state (scripts/mock-platform.py)
+.mock-platform/
+
+# Internal working documents — business strategy, roadmap and machine-specific
+# notes. They stay on disk; they are not part of the published engine.
+HANDOFF.md
+PLAN.md
+docs/platform-ideas.md
+docs/plan-plataforma.md

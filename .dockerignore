@@ -1,0 +1,17 @@
+# Build artifacts and local state — never needed inside the image.
+bin/
+dist/
+results/
+.cortex/
+coverage.out
+*.sarif
+
+# The E2E fixture is 4 languages of intentionally vulnerable code; it is only
+# needed by the test job, not by the runtime image.
+test/fixtures/
+
+.git/
+.github/
+docs/
+*.md
+!rules/

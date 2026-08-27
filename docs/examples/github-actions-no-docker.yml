@@ -1,0 +1,55 @@
+# Alternative for runners where Docker is unavailable (or self-hosted runners
+# that already carry the toolchains): install Cortex and its scanners directly.
+
+name: SAST (no Docker)
+
+on: [pull_request]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  cortex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Cortex and the scanners
+        run: |
+          go install github.com/vektcore/cortex/cmd/cortex@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          pipx install semgrep
+          pipx install bandit
+          pipx inject bandit bandit-sarif-formatter      # bandit has no native SARIF
+          npm i -g eslint@8 eslint-plugin-security @microsoft/eslint-formatter-sarif
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          echo "CORTEX_ESLINT_PLUGINS_DIR=$(npm root -g)" >> "$GITHUB_ENV"
+          echo "CORTEX_ESLINT_FORMATTER=$(npm root -g)/@microsoft/eslint-formatter-sarif" >> "$GITHUB_ENV"
+
+      - name: Which scanners apply here
+        run: cortex detect
+
+      - name: Scan and gate
+        run: |
+          cortex scan . --output results/
+          cortex verify results/scan.sarif >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results/scan.sarif
+          category: cortex

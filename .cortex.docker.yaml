@@ -1,0 +1,73 @@
+# Default Cortex configuration baked into the container image.
+# Override by mounting your own file and passing: cortex -c /src/.cortex.yaml
+#
+# ESLint paths come from CORTEX_ESLINT_PLUGINS_DIR / CORTEX_ESLINT_FORMATTER,
+# set in the Dockerfile, so no per-repo option is needed.
+
+version: "1"
+
+scanners:
+  semgrep:
+    enabled: true
+    timeout: 15m
+    # config and rules_dir come from CORTEX_SEMGREP_CONFIG /
+    # CORTEX_SEMGREP_RULES, set in the Dockerfile.
+  bandit:
+    enabled: true
+  gosec:
+    enabled: true
+  gitleaks:
+    enabled: true
+  eslint_security:
+    enabled: true
+  osv:                      # dependency vulnerabilities (SCA)
+    enabled: true
+  trivy:                    # second opinion on dependencies
+    enabled: true
+  spotbugs:
+    enabled: false          # needs a Maven/Gradle build — not in this image
+  security_code_scan:
+    enabled: false          # needs the .NET SDK and the analyzer in the csproj
+
+gate:
+  rules:
+    - name: no-critical
+      severity: critical
+      threshold: ">=1"
+    - name: few-high
+      severity: high
+      threshold: ">5"
+
+# Suppressed from the gate only — still reported and still in the SARIF.
+ignore:
+  - rule_id: B101
+    path_prefix: tests/
+    reason: "asserts are the point of a test file"
+  - rule_id: B101
+    path_prefix: test/
+    reason: "asserts are the point of a test file"
+
+publishers:
+  filesystem:
+    enabled: true
+    output_dir: results/
+  korvlabs:
+    enabled: false
+    # url: https://api.korvlabs.example   # set the real KorvLabs endpoint
+    api_key: ${KORVLABS_API_KEY}
+
+# Vulnerability tracking. Inside a container the state has to live on a mount to
+# survive the run, and the scanned repository is often read-only — so the default
+# points at /state, which the image creates. Mount it to keep the history:
+#
+#   docker run -v "$PWD":/src:ro -v cortex-state:/state ghcr.io/vektcore/cortex …
+#
+# Without that mount the scan still works; it just forgets between runs and says
+# so.
+state:
+  enabled: true
+  path: /state/state.json
+
+reachability:
+  enabled: true
+  demote: true

@@ -1,0 +1,100 @@
+# Configuration for `cortex serve` — the deployment where the engine runs on
+# your server and clients connect with an API key.
+#
+# Mounted at /etc/cortex/server.yaml by docker-compose.server.yml.
+
+version: "1"
+
+server:
+  addr: ":8080"
+  # Must be a mounted volume: it holds every project's history.
+  data_dir: /var/lib/cortex
+  # Each analysis clones a repository and runs several scanners, so useful
+  # concurrency is low. Two is a sensible start for a 4-core box.
+  workers: 2
+
+  # One entry per client. The name appears in the logs and on each analysis, so
+  # work is attributable without ever printing a key.
+  #
+  # Generate one with: openssl rand -hex 32
+  # Keep them in the environment, never in this file.
+  api_keys:
+    - name: acme
+      key: ${CLIENT_ACME_KEY}
+    # - name: globex
+    #   key: ${CLIENT_GLOBEX_KEY}
+
+# Third-party code is not what the client is paying to have reviewed.
+exclude:
+  - node_modules/
+  - vendor/
+  - .venv/
+  - venv/
+  - target/
+  - dist/
+  - build/
+  - "*.min.js"
+
+severity:
+  escalate:
+    CWE-89: critical      # SQL injection
+    CWE-78: critical      # OS command injection
+    CWE-94: critical      # code injection
+    CWE-502: critical     # insecure deserialization
+
+scanners:
+  semgrep:
+    enabled: true
+    timeout: 20m          # client monorepos are bigger than any fixture
+    options:
+      # Named rulesets, not "auto": auto resolves the set on Semgrep's servers
+      # from project metadata, which needs their metrics on and can change
+      # between runs. A service has to be reproducible.
+      config: "p/security-audit,p/owasp-top-ten,p/secrets"
+      rules_dir: /usr/share/cortex/rules
+  bandit:
+    enabled: true
+  gosec:
+    enabled: true
+  gitleaks:
+    enabled: true
+    options:
+      # Never verify someone else's credentials against their provider without
+      # asking them first.
+      verify: "false"
+  osv:
+    enabled: true
+  eslint_security:
+    enabled: true
+  spotbugs:
+    enabled: false        # needs `mvn package` inside the client's repo
+  security_code_scan:
+    enabled: false        # needs the analyzer wired into their .csproj
+
+reachability:
+  enabled: true
+  demote: true
+
+# The gate verdict is reported per analysis. It does not fail the service — the
+# client decides what to do with "gate": "failed".
+gate:
+  rules:
+    - name: no-critical
+      severity: critical
+      threshold: ">=1"
+    - name: few-high
+      severity: high
+      threshold: ">10"
+
+# The server keeps state per project under data_dir, so this section is only
+# about the engine's own default; the server overrides the path per analysis.
+state:
+  enabled: true
+
+publishers:
+  # The server stores the SARIF itself and serves it from
+  # /api/v1/analyses/{id}/sarif, so no publisher is needed.
+  filesystem:
+    enabled: false
+  korvlabs:
+    enabled: false

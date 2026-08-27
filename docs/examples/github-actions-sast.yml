@@ -1,0 +1,50 @@
+# Drop this into .github/workflows/sast.yml of the repository you want gated.
+#
+# It runs Cortex on every pull request and push to main, publishes the findings
+# to the repository's Security tab, and blocks the merge when the Quality Gate
+# fails.
+
+name: SAST
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 1"   # weekly full scan, catches new rules on old code
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF to Code Scanning
+  pull-requests: write     # only needed if you post the report as a comment
+
+concurrency:
+  group: sast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cortex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history is only needed if you gate on a git baseline.
+          fetch-depth: 0
+
+      - name: Cortex SAST
+        uses: vektcore/cortex@v1          # or: ./ when vendored in this repo
+        with:
+          path: .
+          # config: .cortex.yaml          # auto-detected when present
+          # baseline: .cortex/baseline.sarif
+          fail-on-gate: true
+          upload-sarif: true
+
+      - name: Keep the SARIF as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cortex-sarif
+          path: results/
+          retention-days: 30

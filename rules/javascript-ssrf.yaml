@@ -1,0 +1,46 @@
+rules:
+  - id: cortex-javascript-ssrf
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      SSRF: the parameter "$NAME" is used as the target URL of an outbound
+      request without validation. An attacker-controlled URL can reach internal
+      services (169.254.169.254, localhost, cluster DNS). Validate the host
+      against an allowlist before requesting it.
+    metadata:
+      cwe:
+        - "CWE-918: Server-Side Request Forgery (SSRF)"
+      category: security
+      confidence: MEDIUM
+      security-severity: "8.0"
+      references:
+        - https://owasp.org/www-community/attacks/Server_Side_Request_Forgery
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  function $F(..., $NAME, ...) { ... }
+              - pattern-inside: |
+                  async function $F(..., $NAME, ...) { ... }
+              # Arrow functions, whose parameter list Semgrep only matches with
+              # the "..." form.
+              - pattern-inside: |
+                  (...) => { ... }
+          - pattern: $NAME
+    pattern-sanitizers:
+      - pattern: new URL(...).hostname
+      - pattern: $ALLOWLIST.includes(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: axios.get($URL, ...)
+              - pattern: axios.post($URL, ...)
+              - pattern: axios.put($URL, ...)
+              - pattern: axios.head($URL, ...)
+              - pattern: axios.delete($URL, ...)
+              - pattern: axios($URL, ...)
+              - pattern: fetch($URL, ...)
+              - pattern: http.get($URL, ...)
+              - pattern: https.get($URL, ...)
+              - pattern: request($URL, ...)

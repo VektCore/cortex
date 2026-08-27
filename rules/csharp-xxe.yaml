@@ -1,0 +1,22 @@
+rules:
+  - id: cortex-csharp-xxe
+    languages: [csharp]
+    severity: ERROR
+    message: >-
+      XXE: XML parsing is configured to resolve external entities
+      (XmlUrlResolver / DtdProcessing.Parse). A document with a crafted DTD can
+      read local files or reach internal services. Set XmlResolver = null and
+      DtdProcessing = DtdProcessing.Prohibit.
+    metadata:
+      cwe:
+        - "CWE-611: Improper Restriction of XML External Entity Reference"
+      category: security
+      confidence: HIGH
+      security-severity: "8.0"
+      references:
+        - https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html
+    pattern-either:
+      - pattern: new XmlUrlResolver()
+      - pattern: $X.XmlResolver = new XmlUrlResolver()
+      - pattern: $X.DtdProcessing = DtdProcessing.Parse
+      - pattern: $X.ProhibitDtd = false

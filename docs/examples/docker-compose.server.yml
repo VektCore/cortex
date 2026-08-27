@@ -1,0 +1,67 @@
+# Deploy Cortex as a service on your own server.
+#
+#   docker compose -f docs/examples/docker-compose.server.yml up -d
+#
+# Clients then submit repositories with an API key and never install a scanner:
+#
+#   curl -X POST https://sast.example.com/api/v1/analyses \
+#     -H "Authorization: Bearer $CLIENT_KEY" \
+#     -H 'Content-Type: application/json' \
+#     -d '{"repository":"github.com/acme/api","ref":"main","project":"acme-api"}'
+#
+# Put this behind a reverse proxy that terminates TLS. The API keys travel in a
+# header, so plain HTTP would hand them to anyone on the path.
+
+services:
+  cortex:
+    image: ghcr.io/vektcore/cortex:latest
+    # Or build locally until the image is published:
+    # build: { context: ../.., dockerfile: Dockerfile }
+    command: ["serve", "-c", "/etc/cortex/server.yaml"]
+    restart: unless-stopped
+
+    # Bound to localhost: the reverse proxy is what faces the internet.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    volumes:
+      # The server's own config, with the API keys.
+      - ./server.yaml:/etc/cortex/server.yaml:ro
+      # Analyses, their SARIF and every project's tracked history. Without this
+      # volume a redeploy forgets everything and every finding looks new again.
+      - cortex-data:/var/lib/cortex
+      # Read-only SSH key, if you clone private repositories over SSH.
+      # - ${HOME}/.ssh/cortex_deploy_key:/root/.ssh/id_ed25519:ro
+
+    environment:
+      # Credentials for cloning private repositories. They live on the server,
+      # so clients never send tokens over the API.
+      - CORTEX_GIT_TOKEN=${CORTEX_GIT_TOKEN:-}
+      # Client API keys, referenced from server.yaml as ${CLIENT_ACME_KEY}.
+      - CLIENT_ACME_KEY=${CLIENT_ACME_KEY:?set CLIENT_ACME_KEY in .env}
+      # Semgrep's "auto" ruleset phones home to resolve rules; named rulesets
+      # (what the shipped configs use) do not need this, and turning metrics off
+      # keeps a client's project metadata to yourself.
+      - SEMGREP_SEND_METRICS=off
+      # ESLint resolves plugins from the project it lints; the image installs
+      # them globally instead.
+      - CORTEX_ESLINT_PLUGINS_DIR=/usr/local/lib/node_modules
+      - CORTEX_ESLINT_FORMATTER=/usr/local/lib/node_modules/@microsoft/eslint-formatter-sarif
+      - CORTEX_SEMGREP_RULES=/usr/share/cortex/rules
+
+    healthcheck:
+      test: ["CMD", "cortex", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+    # An analysis clones a repository and runs several scanners in parallel, so
+    # give it room — and cap it, so one large monorepo cannot take the box down.
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 6G
+
+volumes:
+  cortex-data:

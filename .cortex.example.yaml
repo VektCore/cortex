@@ -1,0 +1,243 @@
+# Cortex configuration — example.
+# Copy to .cortex.yaml in your repo root and adjust.
+#
+# This file mirrors exactly what internal/infrastructure/config parses today.
+# Anything not listed here is not read yet (see "Not implemented" at the end).
+#
+# Every value can be overridden by an environment variable prefixed with
+# CORTEX_ and dots replaced by underscores, e.g.
+#   CORTEX_PUBLISHERS_KORVLABS_URL=https://api.korvlabs.example
+
+version: "1"
+
+# ---------------------------------------------------------------------------
+# Path exclusion
+# ---------------------------------------------------------------------------
+# Patterns are passed to each scanner's own exclude flag where one exists, and
+# applied as a finding filter for the ones without. Each pattern matches as a
+# prefix, as a glob, or as a directory segment at any depth ("tests/" covers
+# services/api/tests/).
+#
+# Defaults (replaced, not merged, when you set this key):
+#   node_modules/ vendor/ .venv/ venv/ site-packages/ dist/ build/ target/
+#   __pycache__/ .git/ *.min.js *.min.css
+exclude:
+  - node_modules/
+  - vendor/
+  - .venv/
+  - "*.min.js"
+
+# ---------------------------------------------------------------------------
+# Severity
+# ---------------------------------------------------------------------------
+# No scanner in the MVP set emits a CVSS score and SARIF's vocabulary stops at
+# "error" (= high), so nothing would ever be critical and the default
+# "fail on any critical" rule could never fire. Severity therefore comes partly
+# from the weakness class.
+#
+# Escalation only ever raises, never lowers, and only applies to findings the
+# scanner already rated medium or above — otherwise every "you imported
+# subprocess" advisory would become critical.
+severity:
+  escalate:
+    CWE-89: critical     # SQL injection
+    CWE-78: critical     # OS command injection
+    CWE-94: critical     # code injection
+    CWE-95: critical     # eval injection
+    CWE-502: critical    # insecure deserialization
+    CWE-611: high        # XXE
+    CWE-798: high        # hardcoded credentials
+    CWE-22: high         # path traversal
+    CWE-79: high         # XSS
+    CWE-918: high        # SSRF
+  # no_defaults: true    # replace the built-ins instead of merging with them
+
+# ---------------------------------------------------------------------------
+# Vulnerability tracking (state)
+# ---------------------------------------------------------------------------
+# The memory that turns a sequence of scans into vulnerability management: what
+# is new, what came back after being fixed, what somebody already judged.
+#
+# Identity is a three-level fingerprint (exact line / file content / enclosing
+# symbol) matched in cascade, so a triage decision survives an edit above it or
+# the function being moved to another file.
+#
+# Commit the state file to make triage decisions travel with the code and get
+# reviewed like code; or cache it in CI; or turn this off and Cortex behaves like
+# a stateless scanner.
+#
+#   cortex status                     open / triaged / resolved, regressions
+#   cortex triage <fp> --status …     record a decision
+#   cortex scan --no-track            scan without writing state (pull requests)
+#   cortex verify --new-only          gate only on never-seen-before findings
+#   cortex verify --changed-since REF gate only on lines this branch touched
+state:
+  enabled: true
+  path: .cortex/state.json
+
+  # Where the state lives: "file" (default) or "remote".
+  #
+  # "file" commits the history with the code, which is right for a repository
+  # you own. It does not work for a managed service: a client's repository is
+  # not going to carry our state document, and the triage has to be visible to
+  # whoever runs the platform. "remote" keeps it server-side instead, in the
+  # same format, so a project can switch backends without a migration.
+  backend: file
+  # remote:
+  #   url: https://api.korvlabs.example    # API base, no trailing path
+  #   token: ${KORVLABS_API_KEY}           # authenticates this project
+  #   project: acme-api                    # which project's history to use;
+  #                                        # two repos sharing an id would each
+  #                                        # look new to the other
+
+# ---------------------------------------------------------------------------
+# Server mode (`cortex serve`)
+# ---------------------------------------------------------------------------
+# Only read by `cortex serve`: the deployment where the engine runs on your own
+# server and clients submit repositories with an API key instead of installing
+# the scanners themselves. See docs/examples/server.yaml for a complete one.
+server:
+  addr: ":8080"
+  # Holds analyses, their SARIF and every project's tracked history. Must
+  # survive restarts, or each redeploy makes every finding look new again.
+  data_dir: /var/lib/cortex
+  # Concurrent analyses. Each clones a repository and runs several scanners.
+  workers: 2
+  # One entry per client. The name is what appears in logs and on analyses, so
+  # a key is never printed. Generate with: openssl rand -hex 32
+  api_keys: []
+  #  - name: acme
+  #    key: ${CLIENT_ACME_KEY}
+  #
+  # With no keys the server refuses to start: it can clone repositories, so an
+  # unauthenticated instance is not a sensible default.
+
+# ---------------------------------------------------------------------------
+# Reachability
+# ---------------------------------------------------------------------------
+# Labels each finding by whether anything in the project calls the code it sits
+# in. A weakness in dead code is real but not urgent, and saying so is more
+# honest than hiding it or ranking it next to a live SQL injection.
+#
+# Conservative by design: entrypoints, exported symbols and anything the
+# analysis cannot decide stay "unknown" and are never demoted. A demoted
+# finding is also never escalated back by the severity policy.
+reachability:
+  enabled: true
+  demote: true      # unreachable findings drop one severity step, never below low
+
+# ---------------------------------------------------------------------------
+# Deduplication
+# ---------------------------------------------------------------------------
+dedup:
+  # Collapse the same CWE reported at the same place by different tools.
+  # Off by default: two scanners agreeing is a confidence signal, and the scan
+  # summary reports how many weaknesses were corroborated.
+  cross_scanner: false
+
+# ---------------------------------------------------------------------------
+# Scanners
+# ---------------------------------------------------------------------------
+# A scanner is invoked only when enabled AND its binary is on PATH. A missing
+# binary is a non-fatal, per-scanner error: the rest of the scan continues.
+#
+#   timeout  Go duration string ("5m", "90s"). Defaults to the adapter's own.
+#   options  Adapter-specific key/value pairs (see docs/extending.md).
+scanners:
+  semgrep:                    # any language — requires: pipx install semgrep
+    enabled: true
+    timeout: 10m
+    options:
+      # Comma-separated list of rule sources.
+      config: auto            # or "auto,p/security-audit,p/owasp-top-ten"
+      # Cortex's own rule pack, covering weaknesses the registry set misses
+      # (path traversal from a parameter, SSRF, C# XXE). In the Docker image
+      # this comes from CORTEX_SEMGREP_RULES.
+      rules_dir: rules
+  bandit:                     # Python — requires the SARIF formatter plugin:
+    enabled: true             #   pipx inject bandit bandit-sarif-formatter
+  gosec:                      # Go — go install github.com/securego/gosec/v2/cmd/gosec@latest
+    enabled: true
+  gitleaks:                   # secrets, any language — brew install gitleaks
+    enabled: true
+    options:
+      # Check whether each detected credential still works: a live token goes to
+      # critical, a revoked one drops to low (still reported — it is in the
+      # history). Off by default because verification sends the credential to
+      # its own provider in a read-only call.
+      verify: "false"
+      # scan_git_history: "true"   # scan commits instead of the working tree
+  osv:                        # dependencies (SCA) — brew install osv-scanner
+    enabled: true
+    options:
+      # osv-scanner's own reachability analysis; Go and Rust only, and Rust runs
+      # dependency build scripts.
+      call_analysis: ""       # e.g. "go"
+  trivy:                      # dependencies (SCA), second opinion — brew install trivy
+    enabled: false            # opt-in: downloads a vulnerability database
+    options:
+      severity: "MEDIUM,HIGH,CRITICAL"
+  eslint_security:            # JS/TS — npm i -g eslint@8 eslint-plugin-security
+    enabled: false            #   @microsoft/eslint-formatter-sarif
+    options:
+      config: ""              # empty = run with --no-eslintrc
+  spotbugs:                   # Java — needs compiled classes (mvn package first)
+    enabled: false
+  security_code_scan:         # C#/.NET — needs the analyzer in the .csproj
+    enabled: false
+
+# ---------------------------------------------------------------------------
+# Quality Gate
+# ---------------------------------------------------------------------------
+# Each rule counts the findings matching its criteria and fails when the
+# threshold triggers. With no rules, the default policy is a single
+# "fail on >=1 critical".
+#
+#   severity     minimum severity to match: info, low, medium, high, critical
+#   cwes         only findings carrying one of these CWEs
+#   path_prefix  only findings under one of these path prefixes
+#   threshold    ">=1", ">5", "=0", "<=3" — a bare number N means ">=N"
+gate:
+  rules:
+    - name: no-critical
+      severity: critical
+      threshold: ">=1"
+    - name: few-high
+      severity: high
+      threshold: ">5"
+    - name: injection-cwes
+      cwes: [CWE-89, CWE-78, CWE-94]
+      threshold: ">=1"
+
+# ---------------------------------------------------------------------------
+# Allowlist
+# ---------------------------------------------------------------------------
+# Suppresses matching findings from gate evaluation only — they still appear in
+# reports and in the SARIF output. An expired entry stops suppressing.
+ignore:
+  - rule_id: B101
+    path_prefix: tests/
+    reason: "asserts in tests are intentional"
+    expires: "2026-12-31"
+
+# ---------------------------------------------------------------------------
+# Publishers
+# ---------------------------------------------------------------------------
+# Enabled publishers run in fan-out; a failure in one is reported but never
+# aborts the others (exit code 4 when any fails).
+publishers:
+  filesystem:
+    enabled: true
+    output_dir: results/
+  korvlabs:
+    enabled: false
+    # url: https://api.korvlabs.example   # set the real KorvLabs endpoint
+    api_key: ${KORVLABS_API_KEY}
+
+# ---------------------------------------------------------------------------
+# Not implemented yet — do not add these keys, they are silently ignored:
+#   gate.baseline           use "cortex verify --baseline <file>"
+#   publishers.github_code_scanning, publishers.gitlab_security
+#   notifiers.*             (github_pr, slack, stdout)
+#   project.*               metadata forwarded to KorvLabs
+# ---------------------------------------------------------------------------

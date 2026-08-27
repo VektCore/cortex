@@ -1,0 +1,52 @@
+name: SAST Scan
+
+on:
+  push:
+    branches: [master, main, develop]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep Scan
+        run: |
+          semgrep scan \
+            --config "p/security-audit" \
+            --config "p/secrets" \
+            --config "p/owasp-top-ten" \
+            --sarif \
+            --output results.sarif \
+            . || true
+
+      - name: Show scan results
+        run: |
+          echo "=== SARIF Results ==="
+          if [ -f results.sarif ]; then
+            cat results.sarif | head -100
+            echo "..."
+          else
+            echo "No SARIF file generated"
+          fi
+
+      - name: Upload SARIF to Kassandra
+        if: always()
+        env:
+          KASSANDRA_PROJECT_ID: ${{ secrets.KASSANDRA_PROJECT_ID }}
+        run: |
+          if [ -f results.sarif ]; then
+            echo "Uploading SARIF to Kassandra..."
+            curl -v -X POST \
+              -H "Content-Type: application/json" \
+              -d @results.sarif \
+              "https://api.kassandra.red/api/v1/sast/webhooks/${KASSANDRA_PROJECT_ID}/sarif?branch=${{ github.ref_name }}&commit=${{ github.sha }}"
+          else
+            echo "No SARIF file to upload"
+          fi

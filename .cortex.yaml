@@ -1,0 +1,76 @@
+# Cortex's own configuration — used to dogfood the engine on this repository
+# and on test/fixtures/kassandra-sast-demo.
+# See .cortex.example.yaml for the full documented schema.
+
+version: "1"
+
+scanners:
+  semgrep:
+    enabled: true
+    timeout: 10m
+    options:
+      # Named rulesets rather than "auto": auto resolves the ruleset on
+      # Semgrep's servers from project metadata, so it needs their metrics
+      # enabled and can return a different set from one day to the next. The
+      # fixture contract test cannot rest on that.
+      config: "p/security-audit,p/owasp-top-ten,p/secrets"
+      # Cortex's own pack, covering weaknesses the registry set misses.
+      rules_dir: rules
+  bandit:
+    enabled: true
+  gosec:
+    enabled: true
+  gitleaks:
+    enabled: true
+  eslint_security:
+    enabled: true
+    # ESLint resolves plugins and formatters from inside the project it lints,
+    # and this project has neither installed. Rather than hard-coding one
+    # machine's node path here, the resolver is pointed at the global install
+    # through the environment:
+    #
+    #   export CORTEX_ESLINT_PLUGINS_DIR="$(npm root -g)"
+    #   export CORTEX_ESLINT_FORMATTER="$(npm root -g)/@microsoft/eslint-formatter-sarif"
+    #
+    # scripts/bench.sh does exactly that, and the Docker image bakes it in.
+  spotbugs:
+    enabled: false        # needs a Maven build first
+  security_code_scan:
+    enabled: false        # needs the analyzer wired into the .csproj
+
+gate:
+  rules:
+    - name: no-critical
+      severity: critical
+      threshold: ">=1"
+    - name: few-high
+      severity: high
+      threshold: ">5"
+
+# Suppressed from the gate only — still reported and still in the SARIF.
+ignore:
+  - rule_id: B101
+    path_prefix: tests/
+    reason: "asserts are the point of a test file"
+  - rule_id: B101
+    path_prefix: test/
+    reason: "asserts are the point of a test file"
+
+publishers:
+  filesystem:
+    enabled: true
+    output_dir: results/
+  korvlabs:
+    enabled: false
+    # url: https://api.korvlabs.example   # set the real KorvLabs endpoint
+
+# Vulnerability tracking: the state travels with the repo so triage decisions
+# are reviewed like code.
+state:
+  enabled: true
+  path: .cortex/state.json
+
+reachability:
+  enabled: true
+  demote: true
+

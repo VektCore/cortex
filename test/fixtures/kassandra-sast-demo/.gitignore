@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build
+dist/
+build/
+*.class
+target/
+
+# SARIF results (don't commit scan results)
+*.sarif
+results/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db

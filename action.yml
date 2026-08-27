@@ -1,0 +1,145 @@
+name: Cortex SAST
+description: Run the Cortex multi-scanner SAST pipeline and gate the build on its Quality Gate.
+author: VektCore
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  path:
+    description: Path inside the repository to analyse.
+    required: false
+    default: .
+  config:
+    description: >
+      Cortex configuration file. Defaults to .cortex.yaml in the repository when
+      present, otherwise the one baked into the image.
+    required: false
+    default: ""
+  image:
+    description: Cortex image to run.
+    required: false
+    default: ghcr.io/vektcore/cortex:latest
+  results-dir:
+    description: Directory (relative to the repository) for the SARIF artifacts.
+    required: false
+    default: results
+  baseline:
+    description: >
+      Path to a baseline SARIF. When set, only findings absent from it count
+      towards the Quality Gate.
+    required: false
+    default: ""
+  fail-on-gate:
+    description: Fail the step when the Quality Gate fails.
+    required: false
+    default: "true"
+  upload-sarif:
+    description: >
+      Upload the merged SARIF to GitHub Code Scanning. Requires the
+      security-events:write permission.
+    required: false
+    default: "true"
+  korvlabs-api-key:
+    description: API key for the KorvLabs publisher, when enabled in the config.
+    required: false
+    default: ""
+
+outputs:
+  sarif:
+    description: Path to the merged SARIF document.
+    value: ${{ steps.cortex.outputs.sarif }}
+  findings:
+    description: Number of findings after deduplication.
+    value: ${{ steps.cortex.outputs.findings }}
+  gate:
+    description: passed or failed.
+    value: ${{ steps.cortex.outputs.gate }}
+
+runs:
+  using: composite
+  steps:
+    - id: cortex
+      shell: bash
+      env:
+        CORTEX_IMAGE: ${{ inputs.image }}
+        CORTEX_PATH: ${{ inputs.path }}
+        CORTEX_CONFIG: ${{ inputs.config }}
+        CORTEX_RESULTS: ${{ inputs.results-dir }}
+        CORTEX_BASELINE: ${{ inputs.baseline }}
+        KORVLABS_API_KEY: ${{ inputs.korvlabs-api-key }}
+      run: |
+        set -uo pipefail
+
+        docker pull --quiet "$CORTEX_IMAGE"
+
+        # A repository without its own config falls back to the image default.
+        config="$CORTEX_CONFIG"
+        if [ -z "$config" ]; then
+          if [ -f "$GITHUB_WORKSPACE/.cortex.yaml" ]; then
+            config=".cortex.yaml"
+          else
+            config="/etc/cortex/cortex.yaml"
+          fi
+        fi
+
+        mkdir -p "$GITHUB_WORKSPACE/$CORTEX_RESULTS"
+
+        run_cortex() {
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -w /src \
+            -e GITHUB_ACTIONS=true \
+            ${KORVLABS_API_KEY:+-e CORTEX_PUBLISHERS_KORVLABS_API_KEY="$KORVLABS_API_KEY"} \
+            "$CORTEX_IMAGE" "$@"
+        }
+
+        run_cortex scan "$CORTEX_PATH" -c "$config" --output "$CORTEX_RESULTS"
+        scan_status=$?
+        if [ $scan_status -ne 0 ]; then
+          echo "::error::cortex scan failed (exit $scan_status)"
+          exit $scan_status
+        fi
+
+        sarif="$CORTEX_RESULTS/scan.sarif"
+        echo "sarif=$sarif" >> "$GITHUB_OUTPUT"
+
+        findings=$(run_cortex report "$sarif" -c "$config" --format json \
+          | python3 -c 'import json,sys; print(json.load(sys.stdin)["total"])' 2>/dev/null || echo 0)
+        echo "findings=$findings" >> "$GITHUB_OUTPUT"
+
+        # verify writes the markdown report and exits 1 when the gate fails.
+        verify_args=(verify "$sarif" -c "$config")
+        if [ -n "$CORTEX_BASELINE" ]; then
+          verify_args+=(--baseline "$CORTEX_BASELINE")
+        fi
+
+        run_cortex "${verify_args[@]}" | tee "$RUNNER_TEMP/cortex-report.md"
+        gate_status=${PIPESTATUS[0]}
+
+        cat "$RUNNER_TEMP/cortex-report.md" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ $gate_status -eq 0 ]; then
+          echo "gate=passed" >> "$GITHUB_OUTPUT"
+        else
+          echo "gate=failed" >> "$GITHUB_OUTPUT"
+        fi
+        echo "gate_status=$gate_status" >> "$GITHUB_ENV"
+
+    - name: Upload SARIF to Code Scanning
+      if: ${{ inputs.upload-sarif == 'true' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.cortex.outputs.sarif }}
+        category: cortex
+
+    - name: Enforce the Quality Gate
+      if: ${{ inputs.fail-on-gate == 'true' }}
+      shell: bash
+      run: |
+        if [ "${gate_status:-0}" != "0" ]; then
+          echo "::error::Cortex Quality Gate failed"
+          exit 1
+        fi
+        echo "Cortex Quality Gate passed"

@@ -1,0 +1,26 @@
+# Semgrep's built-in ignore list drops test directories. In this repository the
+# code under test lives in test/fixtures/kassandra-sast-demo — the fixture *is*
+# the subject of the E2E contract — so that default silences every file the
+# contract asserts on, and `make test-e2e` fails with 21 "no finding was
+# reported there" messages.
+#
+# Providing this file replaces Semgrep's default list, so it re-states only what
+# genuinely should not be scanned. Keep it aligned with `exclude:` in
+# .cortex.yaml.
+
+node_modules/
+vendor/
+.venv/
+venv/
+site-packages/
+dist/
+build/
+target/
+__pycache__/
+*.min.js
+*.min.css
+
+# Cortex's own scan artifacts
+bench/
+results/
+.cortex/

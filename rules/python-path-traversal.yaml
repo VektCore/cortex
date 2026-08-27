@@ -1,0 +1,48 @@
+# Cortex rule pack — weaknesses the OSS scanner set misses.
+#
+# The registry rules for path traversal require a source Semgrep recognises
+# (a Flask/Django request, say). A plain function parameter flowing into a file
+# operation is just as exploitable when the caller is a handler, and it is the
+# shape most helper modules have — so Cortex owns the rule.
+rules:
+  - id: cortex-python-path-traversal
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Path traversal: the parameter "$NAME" reaches a filesystem operation
+      without normalization. A caller passing "../../etc/passwd" escapes the
+      intended directory. Resolve the path and verify it stays inside the base
+      directory (os.path.realpath + startswith), or reduce it to a basename.
+    metadata:
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      category: security
+      confidence: MEDIUM
+      security-severity: "7.5"
+      references:
+        - https://owasp.org/www-community/attacks/Path_Traversal
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $F(..., $NAME, ...):
+                  ...
+          - pattern: $NAME
+    pattern-sanitizers:
+      - pattern: os.path.basename(...)
+      - pattern: secure_filename(...)
+      - pattern: os.path.realpath(...)
+      - pattern: $X.resolve()
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: open($PATH, ...)
+              - pattern: os.remove($PATH)
+              - pattern: os.unlink($PATH)
+              - pattern: os.rename($PATH, ...)
+              - pattern: shutil.copy($PATH, ...)
+              - pattern: shutil.rmtree($PATH)
+              - pattern: Path($PATH).read_text(...)
+              - pattern: Path($PATH).read_bytes(...)
+              - pattern: Path($PATH).write_text(...)
+              - pattern: send_file($PATH, ...)
