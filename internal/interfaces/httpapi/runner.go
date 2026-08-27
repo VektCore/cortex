@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/vektcore/cortex/internal/application/dto"
@@ -16,6 +18,13 @@ import (
 	gitinfra "github.com/vektcore/cortex/internal/infrastructure/git"
 )
 
+const (
+	// analysisTimeout caps one analysis: a clone plus several scanners.
+	analysisTimeout = 45 * time.Minute
+	// shutdownGrace is how long Stop waits for in-flight work.
+	shutdownGrace = 30 * time.Second
+)
+
 // Runner executes queued analyses: clone, scan, aggregate, gate, reconcile.
 //
 // It is deliberately a small pool rather than a job framework. Each analysis
@@ -27,7 +36,11 @@ type Runner struct {
 	store  *Store
 	logger ports.Logger
 	queue  chan string
-	done   chan struct{}
+	// ctx is cancelled on Stop, which aborts the clone and the scanners of an
+	// in-flight analysis rather than leaving them orphaned.
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 // NewRunner starts `workers` goroutines draining the queue.
@@ -35,15 +48,18 @@ func NewRunner(cfg *config.Config, store *Store, logger ports.Logger, workers in
 	if workers < 1 {
 		workers = 1
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	r := &Runner{
 		cfg:    cfg,
 		store:  store,
 		logger: logger,
 		// Bounded: a full queue rejects new work with 503 instead of letting
 		// the box accept thousands of clones it will never get to.
-		queue: make(chan string, 256),
-		done:  make(chan struct{}),
+		queue:  make(chan string, 256),
+		ctx:    ctx,
+		cancel: cancel,
 	}
+	r.wg.Add(workers)
 	for i := 0; i < workers; i++ {
 		go r.work()
 	}
@@ -60,13 +76,37 @@ func (r *Runner) Enqueue(id string) bool {
 	}
 }
 
-// Stop stops accepting work. In-flight analyses finish.
-func (r *Runner) Stop() { close(r.done) }
+// Stop cancels in-flight analyses and waits for the workers to return.
+//
+// Waiting matters twice over. On a redeploy, an analysis killed mid-flight
+// would stay "running" in the store forever, with no worker left to finish it.
+// And in tests, a worker still writing into a temp directory outlives the test
+// that created it.
+//
+// The wait is bounded: a scanner wedged on a huge repository must not hold a
+// shutdown open indefinitely.
+func (r *Runner) Stop() {
+	r.cancel()
+
+	finished := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(finished)
+	}()
+
+	select {
+	case <-finished:
+	case <-time.After(shutdownGrace):
+		r.logger.Warn("workers did not stop in time; abandoning them",
+			ports.F("grace", shutdownGrace.String()))
+	}
+}
 
 func (r *Runner) work() {
+	defer r.wg.Done()
 	for {
 		select {
-		case <-r.done:
+		case <-r.ctx.Done():
 			return
 		case id := <-r.queue:
 			r.run(id)
@@ -94,15 +134,22 @@ func (r *Runner) run(id string) {
 		ports.F("repository", gitinfra.Redact(analysis.Repository)))
 
 	// A generous ceiling: cloning plus several scanners over a large monorepo
-	// is minutes, but an analysis must never hang a worker forever.
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	// is minutes, but an analysis must never hang a worker forever. Derived
+	// from the runner's context, so a shutdown aborts it too.
+	ctx, cancel := context.WithTimeout(r.ctx, analysisTimeout)
 	defer cancel()
 
-	if execErr := r.execute(ctx, &analysis); execErr != nil {
+	switch execErr := r.execute(ctx, &analysis); {
+	case execErr == nil:
+		analysis.Status = StatusCompleted
+	case errors.Is(r.ctx.Err(), context.Canceled):
+		// The server is going down. Say so plainly rather than leaving a
+		// half-finished analysis looking like a scanner problem.
+		analysis.Status = StatusFailed
+		analysis.Error = "interrupted: the server shut down mid-analysis"
+	default:
 		analysis.Status = StatusFailed
 		analysis.Error = execErr.Error()
-	} else {
-		analysis.Status = StatusCompleted
 	}
 
 	finished := time.Now().UTC()
