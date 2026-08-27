@@ -46,3 +46,10 @@ HANDOFF.md
 PLAN.md
 docs/platform-ideas.md
 docs/plan-plataforma.md
+
+# The engine's own dogfooding state: it changes on every local scan and is not
+# part of the published engine. (In a product repository, committing
+# .cortex/state.json is the recommended default — that is a per-repo choice.)
+/.cortex/state.json
+# Backup left by the golangci-lint v1 → v2 migration.
+/.golangci.bck.yml
