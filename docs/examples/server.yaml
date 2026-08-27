@@ -32,6 +32,17 @@ server:
   # repository's own default branch.
   webhook_branches: []
 
+  # Writing results back into GitHub is what makes a repository covered without
+  # anything installed in it: the findings become Code Scanning alerts and the
+  # gate verdict a commit status, the way SonarCloud's automatic analysis does.
+  github:
+    # Needs security-events:write (Code Scanning) and statuses:write (the
+    # commit status). A GitHub App installation token is the right shape.
+    token: ${GITHUB_PUBLISH_TOKEN}
+    # Where this server is reachable, used as the link on the commit status.
+    public_url: https://sast.example.com
+    # api_url: https://github.example.com/api/v3   # GitHub Enterprise Server
+
 # Third-party code is not what the client is paying to have reviewed.
 exclude:
   - node_modules/

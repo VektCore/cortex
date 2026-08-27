@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/vektcore/cortex/internal/domain/shared"
 	"github.com/vektcore/cortex/internal/infrastructure/config"
 	gitinfra "github.com/vektcore/cortex/internal/infrastructure/git"
+	ghpublish "github.com/vektcore/cortex/internal/infrastructure/publishers/github_code_scanning"
 )
 
 const (
@@ -191,6 +193,12 @@ func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
 
 	analysis.ScannerErrors = namedErrors(scanResp.Errors)
 	analysis.ScannersRan = len(scanResp.PerScanner)
+	// The clone knows both, and they are what GitHub needs to attach results to
+	// the right place. A request that named no ref still gets published.
+	analysis.Commit = scanResp.Scan.Revision().Commit()
+	if analysis.Ref == "" {
+		analysis.Ref = scanResp.Scan.Revision().Branch()
+	}
 
 	agg := usecases.NewAggregateFindings().Execute(dto.AggregateFindingsRequest{
 		Inputs:       [][]finding.Finding{scanResp.Findings},
@@ -199,7 +207,8 @@ func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
 	analysis.Findings = len(agg.Findings)
 	analysis.BySeverity = countBySeverity(agg.Findings)
 
-	if writeErr := r.writeSARIF(codec, analysis, scanResp, agg.Findings); writeErr != nil {
+	doc, writeErr := r.writeSARIF(codec, analysis, scanResp, agg.Findings)
+	if writeErr != nil {
 		return writeErr
 	}
 
@@ -214,7 +223,15 @@ func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
 	}).Verdict
 	analysis.Gate = gateLabel(verdict)
 
-	return r.reconcile(ctx, analysis, agg.Findings)
+	if err := r.reconcile(ctx, analysis, agg.Findings); err != nil {
+		return err
+	}
+
+	// Publishing back to GitHub is what makes the whole thing visible without
+	// anything installed in the repository. It is the last step and never fails
+	// the analysis: the findings are already stored and served here.
+	r.publishToGitHub(ctx, *analysis, doc)
+	return nil
 }
 
 // reconcile folds the findings into the project's own history, which is what
@@ -247,18 +264,85 @@ func (r *Runner) writeSARIF(
 	analysis *Analysis,
 	scanResp dto.ExecuteScanResponse,
 	deduped []finding.Finding,
-) error {
+) ([]byte, error) {
 	doc, err := codec.Write(deduped, ports.SarifMetadata{
 		Tool:     "cortex",
 		Revision: scanResp.Scan.Revision(),
 	}).Get()
 	if err != nil {
-		return fmt.Errorf("write SARIF: %w", err)
+		return nil, fmt.Errorf("write SARIF: %w", err)
 	}
 	if writeErr := r.store.WriteBlob(r.store.SarifPath(analysis.ID), doc); writeErr != nil {
-		return fmt.Errorf("store SARIF: %w", writeErr)
+		return nil, fmt.Errorf("store SARIF: %w", writeErr)
 	}
-	return nil
+	return doc, nil
+}
+
+// publishToGitHub writes the outcome back into the analysed repository: the
+// findings as Code Scanning alerts, the verdict as a commit status.
+//
+// Every failure here is logged and swallowed. The analysis succeeded; a token
+// without the right scope, or a private repository without GitHub Advanced
+// Security, must not turn a completed scan into a failed one.
+func (r *Runner) publishToGitHub(ctx context.Context, analysis Analysis, sarif []byte) {
+	cfg := r.cfg.Server.GitHub
+	client := ghpublish.New(cfg.APIURL, cfg.Token)
+	if !client.Configured() {
+		return
+	}
+
+	owner, repo, ok := ghpublish.SlugFromURL(analysis.Repository)
+	if !ok {
+		return // not a GitHub repository; nothing to publish to
+	}
+	if analysis.Commit == "" || analysis.Ref == "" {
+		r.logger.Info("skipping GitHub publication: no commit or ref to attach to",
+			ports.F("id", analysis.ID))
+		return
+	}
+
+	if err := client.UploadSARIF(ctx, ghpublish.UploadRequest{
+		Owner:  owner,
+		Repo:   repo,
+		Commit: analysis.Commit,
+		Ref:    "refs/heads/" + analysis.Ref,
+		SARIF:  sarif,
+	}); err != nil {
+		r.logger.Warn("could not upload findings to Code Scanning",
+			ports.F("id", analysis.ID), ports.F("error", err.Error()))
+	} else {
+		r.logger.Info("findings published to Code Scanning",
+			ports.F("id", analysis.ID),
+			ports.F("repository", owner+"/"+repo))
+	}
+
+	if err := client.SetCommitStatus(ctx, ghpublish.StatusRequest{
+		Owner:       owner,
+		Repo:        repo,
+		Commit:      analysis.Commit,
+		Passed:      analysis.Gate == "passed",
+		Description: statusDescription(analysis),
+		TargetURL:   analysisURL(cfg.PublicURL, analysis.ID),
+	}); err != nil {
+		r.logger.Warn("could not set the commit status",
+			ports.F("id", analysis.ID), ports.F("error", err.Error()))
+	}
+}
+
+// statusDescription is the one line a developer reads next to the commit.
+func statusDescription(a Analysis) string {
+	if a.KnownBefore == 0 {
+		return fmt.Sprintf("%d finding(s) across %d scanner(s)", a.Findings, a.ScannersRan)
+	}
+	return fmt.Sprintf("%d new, %d total, %d scanner(s)",
+		a.NewFindings, a.Findings, a.ScannersRan)
+}
+
+func analysisURL(publicURL, id string) string {
+	if publicURL == "" {
+		return ""
+	}
+	return strings.TrimRight(publicURL, "/") + "/api/v1/analyses/" + id
 }
 
 func (r *Runner) escalations() map[finding.CWE]shared.Severity {

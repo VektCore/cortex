@@ -52,6 +52,9 @@ services:
       - CLIENT_ACME_KEY=${CLIENT_ACME_KEY:?set CLIENT_ACME_KEY in .env}
       # Shared secret for GitHub push webhooks (openssl rand -hex 32).
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      # Token for writing results back into GitHub: Code Scanning alerts and
+      # commit statuses. Needs security-events:write and statuses:write.
+      - GITHUB_PUBLISH_TOKEN=${GITHUB_PUBLISH_TOKEN:-}
       # Semgrep's "auto" ruleset phones home to resolve rules; named rulesets
       # (what the shipped configs use) do not need this, and turning metrics off
       # keeps a client's project metadata to yourself.

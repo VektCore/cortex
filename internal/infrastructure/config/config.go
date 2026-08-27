@@ -55,6 +55,23 @@ type ServerConfig struct {
 	// WebhookBranches limits which branches a push triggers an analysis for.
 	// Empty means the repository's own default branch (plus main/master).
 	WebhookBranches []string `mapstructure:"webhook_branches"`
+	// GitHub lets the server write results back into the repository it just
+	// analysed — Code Scanning alerts and a commit status — so a repository can
+	// be covered without a workflow, a config file or a scanner installed in it.
+	GitHub GitHubConfig `mapstructure:"github"`
+}
+
+// GitHubConfig configures publishing results back to GitHub.
+type GitHubConfig struct {
+	// Token needs security-events:write for Code Scanning and statuses:write
+	// for the commit status. A GitHub App installation token is the right shape;
+	// a PAT works for a first run.
+	Token string `mapstructure:"token"`
+	// APIURL overrides https://api.github.com for GitHub Enterprise Server.
+	APIURL string `mapstructure:"api_url"`
+	// PublicURL is where this server can be reached, used as the link on the
+	// commit status so a developer can open the full analysis.
+	PublicURL string `mapstructure:"public_url"`
 }
 
 // APIKey is one client credential.

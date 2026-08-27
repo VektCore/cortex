@@ -24,10 +24,13 @@ const (
 // It is deliberately flat and JSON-shaped: this is what a client polls, so its
 // field names are a public contract.
 type Analysis struct {
-	ID         string         `json:"id"`
-	Project    string         `json:"project"`
-	Repository string         `json:"repository"`
-	Ref        string         `json:"ref,omitempty"`
+	ID         string `json:"id"`
+	Project    string `json:"project"`
+	Repository string `json:"repository"`
+	Ref        string `json:"ref,omitempty"`
+	// Commit is the revision actually analysed, which is what GitHub needs to
+	// attach alerts and a status to the right place.
+	Commit     string         `json:"commit,omitempty"`
 	Status     string         `json:"status"`
 	Gate       string         `json:"gate,omitempty"` // passed | failed
 	Findings   int            `json:"findings"`
