@@ -10,7 +10,10 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.22"
+  # The go directive in go.mod stays at 1.22; this is the toolchain CI builds
+  # with. 1.22 itself no longer links runnable binaries on current macOS
+  # runners ("dyld: missing LC_UUID load command").
+  GO_VERSION: "1.23"
 
 jobs:
   lint:
@@ -25,9 +28,11 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v7+ of the action is what understands golangci-lint v2, which is the
+        # format .golangci.yml is written in. v6 installs v1 and rejects it.
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.13.1
           args: --timeout=5m
 
   test:
@@ -49,6 +54,9 @@ jobs:
         run: go mod download
 
       - name: Run unit tests
+        # bash on every OS: PowerShell splits -coverprofile=coverage.out and Go
+        # ends up being asked for a package called ".out".
+        shell: bash
         run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./internal/...
 
       - name: Upload coverage
@@ -67,12 +75,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
+          # The govulncheck action unpacks its own module cache; layering that
+          # on a populated one fails with "tar: ...: Cannot open: File exists".
+          cache: false
 
       - name: govulncheck
-        uses: golang/govulncheck-action@v1
-        with:
-          go-version-input: ${{ env.GO_VERSION }}
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
