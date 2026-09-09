@@ -111,6 +111,7 @@ func (s *Server) queuePush(w http.ResponseWriter, r *http.Request, body []byte) 
 	analysis := Analysis{
 		ID:          RandomID(),
 		Project:     sanitizeSegment(strings.ReplaceAll(push.Repository.FullName, "/", "-")),
+		Source:      SourceGit,
 		Repository:  cloneURLFor(push, gitinfra.HasToken()),
 		Ref:         branch,
 		Status:      StatusQueued,

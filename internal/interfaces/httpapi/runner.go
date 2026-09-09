@@ -14,7 +14,9 @@ import (
 	"github.com/vektcore/cortex/internal/bootstrap"
 	"github.com/vektcore/cortex/internal/domain/finding"
 	"github.com/vektcore/cortex/internal/domain/gate"
+	"github.com/vektcore/cortex/internal/domain/scan"
 	"github.com/vektcore/cortex/internal/domain/shared"
+	"github.com/vektcore/cortex/internal/infrastructure/archive"
 	"github.com/vektcore/cortex/internal/infrastructure/config"
 	gitinfra "github.com/vektcore/cortex/internal/infrastructure/git"
 	ghpublish "github.com/vektcore/cortex/internal/infrastructure/publishers/github_code_scanning"
@@ -27,7 +29,8 @@ const (
 	shutdownGrace = 30 * time.Second
 )
 
-// Runner executes queued analyses: clone, scan, aggregate, gate, reconcile.
+// Runner executes queued analyses: obtain the source, scan, aggregate, gate,
+// reconcile.
 //
 // It is deliberately a small pool rather than a job framework. Each analysis
 // clones a repository and runs several scanners, so the useful concurrency is
@@ -125,6 +128,13 @@ func (r *Runner) run(id string) {
 		return
 	}
 
+	// The archive holds the client's source. It is dropped on every exit path,
+	// including a failed scan, so the data directory never becomes a copy of
+	// every repository the service has seen.
+	if analysis.Source == SourceUpload {
+		defer r.removeArchive(id)
+	}
+
 	started := time.Now().UTC()
 	analysis.Status = StatusRunning
 	analysis.StartedAt = &started
@@ -133,6 +143,7 @@ func (r *Runner) run(id string) {
 	r.logger.Info("analysis started",
 		ports.F("id", id),
 		ports.F("project", analysis.Project),
+		ports.F("source", analysis.Source),
 		ports.F("repository", gitinfra.Redact(analysis.Repository)))
 
 	// A generous ceiling: cloning plus several scanners over a large monorepo
@@ -168,12 +179,9 @@ func (r *Runner) run(id string) {
 
 // execute is the analysis proper. It mutates the record with the results.
 func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
-	dir, cleanup, err := gitinfra.Clone(ctx, gitinfra.CloneSpec{
-		URL: analysis.Repository,
-		Ref: analysis.Ref,
-	})
+	dir, cleanup, err := r.sourceTree(ctx, analysis)
 	if err != nil {
-		return fmt.Errorf("clone: %w", err)
+		return err
 	}
 	defer cleanup()
 
@@ -193,12 +201,7 @@ func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
 
 	analysis.ScannerErrors = namedErrors(scanResp.Errors)
 	analysis.ScannersRan = len(scanResp.PerScanner)
-	// The clone knows both, and they are what GitHub needs to attach results to
-	// the right place. A request that named no ref still gets published.
-	analysis.Commit = scanResp.Scan.Revision().Commit()
-	if analysis.Ref == "" {
-		analysis.Ref = scanResp.Scan.Revision().Branch()
-	}
+	revision := r.resolveRevision(analysis, scanResp.Scan.Revision())
 
 	agg := usecases.NewAggregateFindings().Execute(dto.AggregateFindingsRequest{
 		Inputs:       [][]finding.Finding{scanResp.Findings},
@@ -207,7 +210,7 @@ func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
 	analysis.Findings = len(agg.Findings)
 	analysis.BySeverity = countBySeverity(agg.Findings)
 
-	doc, writeErr := r.writeSARIF(codec, analysis, scanResp, agg.Findings)
+	doc, writeErr := r.writeSARIF(codec, analysis, revision, agg.Findings)
 	if writeErr != nil {
 		return writeErr
 	}
@@ -232,6 +235,84 @@ func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
 	// the analysis: the findings are already stored and served here.
 	r.publishToGitHub(ctx, *analysis, doc)
 	return nil
+}
+
+// sourceTree produces the directory to analyse, and a cleanup that removes it.
+//
+// The two shapes differ in who holds the code. A git analysis means the server
+// was granted access and clones. An upload means the client's pipeline sent the
+// tree and the server never touches their forge at all.
+func (r *Runner) sourceTree(
+	ctx context.Context, analysis *Analysis,
+) (string, func(), error) {
+	if analysis.Source == SourceUpload {
+		return r.expandArchive(analysis)
+	}
+
+	dir, cleanup, err := gitinfra.Clone(ctx, gitinfra.CloneSpec{
+		URL: analysis.Repository,
+		Ref: analysis.Ref,
+	})
+	if err != nil {
+		return "", func() {}, fmt.Errorf("clone: %w", err)
+	}
+	return dir, cleanup, nil
+}
+
+// expandArchive unpacks an uploaded archive under the data directory rather
+// than /tmp, which in a container is often small or memory-backed.
+func (r *Runner) expandArchive(analysis *Analysis) (string, func(), error) {
+	cfg := r.cfg.Server.Upload
+
+	res, cleanup, err := archive.ExtractZip(
+		r.store.ArchivePath(analysis.ID),
+		r.store.WorkDir(),
+		archive.Limits{MaxEntries: cfg.MaxEntries, MaxBytes: cfg.MaxExtractedBytes},
+	)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("archive: %w", err)
+	}
+
+	// A dropped symlink is source the scanners did not see, so it is on the
+	// record rather than only in the extractor.
+	if res.SkippedLinks > 0 {
+		analysis.Error = fmt.Sprintf(
+			"%d symlink(s) in the archive were not extracted", res.SkippedLinks)
+	}
+	r.logger.Info("archive expanded",
+		ports.F("id", analysis.ID),
+		ports.F("files", fmt.Sprint(res.Files)),
+		ports.F("bytes", fmt.Sprint(res.Bytes)),
+		ports.F("skipped_links", fmt.Sprint(res.SkippedLinks)))
+
+	return res.Dir, cleanup, nil
+}
+
+// resolveRevision decides which revision the results are stamped with.
+//
+// A clone carries its own and is authoritative. An uploaded tree has no .git,
+// so the only revision available is the one the pipeline declared — and if it
+// declared none, the scan honestly reports an unknown revision rather than
+// inventing one.
+func (r *Runner) resolveRevision(analysis *Analysis, scanned scan.Revision) scan.Revision {
+	if analysis.Source != SourceUpload {
+		analysis.Commit = scanned.Commit()
+		if analysis.Ref == "" {
+			analysis.Ref = scanned.Branch()
+		}
+		return scanned
+	}
+
+	if analysis.Commit == "" {
+		return scan.UnknownRevision()
+	}
+	revision, err := scan.NewRevision(analysis.Commit, analysis.Ref).Get()
+	if err != nil {
+		r.logger.Warn("declared revision rejected",
+			ports.F("id", analysis.ID), ports.F("error", err.Error()))
+		return scan.UnknownRevision()
+	}
+	return revision
 }
 
 // reconcile folds the findings into the project's own history, which is what
@@ -262,12 +343,12 @@ func (r *Runner) reconcile(
 func (r *Runner) writeSARIF(
 	codec ports.SarifCodec,
 	analysis *Analysis,
-	scanResp dto.ExecuteScanResponse,
+	revision scan.Revision,
 	deduped []finding.Finding,
 ) ([]byte, error) {
 	doc, err := codec.Write(deduped, ports.SarifMetadata{
 		Tool:     "cortex",
-		Revision: scanResp.Scan.Revision(),
+		Revision: revision,
 	}).Get()
 	if err != nil {
 		return nil, fmt.Errorf("write SARIF: %w", err)
@@ -295,26 +376,13 @@ func (r *Runner) publishToGitHub(ctx context.Context, analysis Analysis, sarif [
 	if !ok {
 		return // not a GitHub repository; nothing to publish to
 	}
-	if analysis.Commit == "" || analysis.Ref == "" {
-		r.logger.Info("skipping GitHub publication: no commit or ref to attach to",
+	if analysis.Commit == "" {
+		r.logger.Info("skipping GitHub publication: no commit to attach to",
 			ports.F("id", analysis.ID))
 		return
 	}
 
-	if err := client.UploadSARIF(ctx, ghpublish.UploadRequest{
-		Owner:  owner,
-		Repo:   repo,
-		Commit: analysis.Commit,
-		Ref:    "refs/heads/" + analysis.Ref,
-		SARIF:  sarif,
-	}); err != nil {
-		r.logger.Warn("could not upload findings to Code Scanning",
-			ports.F("id", analysis.ID), ports.F("error", err.Error()))
-	} else {
-		r.logger.Info("findings published to Code Scanning",
-			ports.F("id", analysis.ID),
-			ports.F("repository", owner+"/"+repo))
-	}
+	r.uploadAlerts(ctx, client, analysis, owner, repo, sarif)
 
 	if err := client.SetCommitStatus(ctx, ghpublish.StatusRequest{
 		Owner:       owner,
@@ -327,6 +395,76 @@ func (r *Runner) publishToGitHub(ctx context.Context, analysis Analysis, sarif [
 		r.logger.Warn("could not set the commit status",
 			ports.F("id", analysis.ID), ports.F("error", err.Error()))
 	}
+}
+
+// uploadAlerts publishes the findings as Code Scanning alerts.
+//
+// Separate from the commit status because the two need different things: the
+// status needs only a commit, while an alert has to be attached to a branch.
+// A missing branch used to skip both, which silently dropped the verdict too.
+func (r *Runner) uploadAlerts(
+	ctx context.Context,
+	client *ghpublish.Client,
+	analysis Analysis,
+	owner, repo string,
+	sarif []byte,
+) {
+	ref := qualifyRef(analysis.Ref)
+	if ref == "" {
+		r.logger.Info("skipping Code Scanning: no branch to attach the alerts to",
+			ports.F("id", analysis.ID), ports.F("ref", analysis.Ref))
+		return
+	}
+
+	if err := client.UploadSARIF(ctx, ghpublish.UploadRequest{
+		Owner:  owner,
+		Repo:   repo,
+		Commit: analysis.Commit,
+		Ref:    ref,
+		SARIF:  sarif,
+	}); err != nil {
+		r.logger.Warn("could not upload findings to Code Scanning",
+			ports.F("id", analysis.ID), ports.F("error", err.Error()))
+		return
+	}
+	r.logger.Info("findings published to Code Scanning",
+		ports.F("id", analysis.ID), ports.F("repository", owner+"/"+repo))
+}
+
+// qualifyRef turns what the caller gave us into a ref GitHub will accept.
+//
+// A pipeline that wants the exact commit it is building sends a SHA, which is
+// the right thing to send and the wrong thing to prefix with refs/heads/: the
+// resulting "refs/heads/<sha>" names no branch and the upload is rejected.
+// Such a ref is reported as absent instead, so the commit status still lands.
+func qualifyRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	switch {
+	case ref == "":
+		return ""
+	case strings.HasPrefix(ref, "refs/"):
+		return ref
+	case looksLikeCommitSHA(ref):
+		return ""
+	default:
+		return "refs/heads/" + ref
+	}
+}
+
+// looksLikeCommitSHA reports whether ref is a hex object name rather than a
+// branch. Git allows abbreviations, so anything from seven hex characters up
+// is treated as one — a branch named "abc1234" is possible but pathological.
+func looksLikeCommitSHA(ref string) bool {
+	if len(ref) < 7 || len(ref) > 64 {
+		return false
+	}
+	for _, c := range ref {
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHex {
+			return false
+		}
+	}
+	return true
 }
 
 // statusDescription is the one line a developer reads next to the commit.

@@ -32,6 +32,23 @@ server:
   # repository's own default branch.
   webhook_branches: []
 
+  # Archive upload: the deployment where the client's pipeline sends the source
+  # instead of granting this server access to its repositories. Nothing here
+  # reaches back into the client's forge, so no clone credential is needed.
+  #
+  # The limits are the security posture of that endpoint. An authenticated
+  # client can otherwise fill this disk with one request, and every byte arrives
+  # before anything has been validated.
+  upload:
+    enabled: true
+    # The upload itself, refused while still streaming.
+    max_archive_bytes: 268435456      # 256 MiB
+    # What it may expand into: the guard against a zip bomb, which is small on
+    # the wire by construction.
+    max_extracted_bytes: 2147483648   # 2 GiB
+    # A million empty files exhausts inodes without tripping a size limit.
+    max_entries: 200000
+
   # Writing results back into GitHub is what makes a repository covered without
   # anything installed in it: the findings become Code Scanning alerts and the
   # gate verdict a commit status, the way SonarCloud's automatic analysis does.

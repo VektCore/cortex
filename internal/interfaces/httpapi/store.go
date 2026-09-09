@@ -19,14 +19,30 @@ const (
 	StatusFailed    = "failed"
 )
 
+// Where the analysed code came from.
+const (
+	// SourceGit is a repository the server clones itself.
+	SourceGit = "git"
+	// SourceUpload is an archive the client's pipeline posted, which is how a
+	// client gets analysed without granting the server access to its code.
+	SourceUpload = "upload"
+)
+
 // Analysis is one request to analyse a repository, and its outcome.
 //
 // It is deliberately flat and JSON-shaped: this is what a client polls, so its
 // field names are a public contract.
 type Analysis struct {
-	ID         string `json:"id"`
-	Project    string `json:"project"`
-	Repository string `json:"repository"`
+	ID      string `json:"id"`
+	Project string `json:"project"`
+	// Source says where the code came from: SourceGit, which the server clones,
+	// or SourceUpload, which the client's pipeline sent as an archive. It
+	// decides what the runner does and what the record can be trusted to say —
+	// an upload has no git metadata of its own.
+	Source string `json:"source"`
+	// Repository is the git URL for SourceGit. For SourceUpload it is optional
+	// metadata the pipeline may send so results can still be attributed.
+	Repository string `json:"repository,omitempty"`
 	Ref        string `json:"ref,omitempty"`
 	// Commit is the revision actually analysed, which is what GitHub needs to
 	// attach alerts and a status to the right place.
@@ -65,7 +81,7 @@ type Store struct {
 
 // NewStore prepares the directory layout under root.
 func NewStore(root string) (*Store, error) {
-	for _, dir := range []string{"analyses", "projects", "scans"} {
+	for _, dir := range []string{"analyses", "projects", "scans", "archives", "work"} {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0o750); err != nil {
 			return nil, fmt.Errorf("data dir %q: %w", filepath.Join(root, dir), err)
 		}
@@ -85,6 +101,46 @@ func (s *Store) SarifPath(id string) string {
 // ScanPath is where an ingested SARIF (posted by a client's own CI) lives.
 func (s *Store) ScanPath(id string) string {
 	return filepath.Join(s.root, "scans", id+".sarif")
+}
+
+// WorkDir is where uploaded archives are expanded. It lives under the data
+// directory, not /tmp: in a container /tmp is often small or memory-backed,
+// and a source tree of a few hundred megabytes has to land somewhere real.
+func (s *Store) WorkDir() string {
+	return filepath.Join(s.root, "work")
+}
+
+// ArchivePath is where an uploaded source archive is parked between the
+// request that delivered it and the worker that expands it. It holds a
+// client's source, so the runner deletes it as soon as the analysis ends.
+func (s *Store) ArchivePath(id string) string {
+	return filepath.Join(s.root, "archives", id+".zip")
+}
+
+// CreateArchive opens the archive file for streaming. The upload is written
+// straight to disk: buffering a quarter-gigabyte POST in memory is how one
+// client takes the server down for the others.
+func (s *Store) CreateArchive(id string) (*os.File, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	f, err := os.OpenFile(s.ArchivePath(id), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create archive for %s: %w", id, err)
+	}
+	return f, nil
+}
+
+// RemoveArchive deletes an uploaded archive. Absence is not an error: the
+// caller removes it on every exit path, including ones where it never landed.
+func (s *Store) RemoveArchive(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := os.Remove(s.ArchivePath(id)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove archive for %s: %w", id, err)
+	}
+	return nil
 }
 
 // ProjectStatePath is the vulnerability state file for a project. Each project

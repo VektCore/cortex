@@ -59,6 +59,28 @@ type ServerConfig struct {
 	// analysed — Code Scanning alerts and a commit status — so a repository can
 	// be covered without a workflow, a config file or a scanner installed in it.
 	GitHub GitHubConfig `mapstructure:"github"`
+	// Upload bounds the archive-upload endpoint, the deployment where the
+	// client's pipeline sends the source instead of granting clone access.
+	Upload UploadConfig `mapstructure:"upload"`
+}
+
+// UploadConfig bounds POST /api/v1/analyses/upload.
+//
+// The limits are the whole security posture of that endpoint: an authenticated
+// client can otherwise fill the server's disk with one request, and every byte
+// arrives before anything has been validated.
+type UploadConfig struct {
+	// Enabled opens the endpoint. Off by default: a deployment that only
+	// clones should not also accept uploads it never asked for.
+	Enabled bool `mapstructure:"enabled"`
+	// MaxArchiveBytes caps the upload itself, refused while still streaming.
+	MaxArchiveBytes int64 `mapstructure:"max_archive_bytes"`
+	// MaxExtractedBytes caps what the archive may expand into: the guard
+	// against a zip bomb, which is small on the wire by construction.
+	MaxExtractedBytes int64 `mapstructure:"max_extracted_bytes"`
+	// MaxEntries caps the file count, because a million empty files exhausts
+	// inodes without ever tripping a size limit.
+	MaxEntries int `mapstructure:"max_entries"`
 }
 
 // GitHubConfig configures publishing results back to GitHub.
@@ -231,6 +253,10 @@ func applyDefaults(v *viper.Viper) {
 	v.SetDefault("server.addr", ":8080")
 	v.SetDefault("server.data_dir", "/var/lib/cortex")
 	v.SetDefault("server.workers", 2)
+	v.SetDefault("server.upload.enabled", false)
+	v.SetDefault("server.upload.max_archive_bytes", 256<<20)
+	v.SetDefault("server.upload.max_extracted_bytes", 2<<30)
+	v.SetDefault("server.upload.max_entries", 200_000)
 	v.SetDefault("reachability.enabled", true)
 	v.SetDefault("reachability.demote", true)
 	// Vendored and generated code is other people's problem: scanning it

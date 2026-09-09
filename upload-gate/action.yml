@@ -1,0 +1,213 @@
+name: Cortex Upload Gate
+description: >
+  Send this repository's source to a Cortex server, wait for the verdict, and
+  fail the job when the Quality Gate does not pass. Nothing is installed and no
+  access to the repository is granted: the pipeline pushes the code out.
+author: VektCore
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  server-url:
+    description: Base URL of the Cortex server, e.g. https://sast.example.com.
+    required: true
+  api-key:
+    description: API key issued for this client. Pass a secret, never a literal.
+    required: true
+  project:
+    description: >
+      Stable identifier the finding history is kept under. Changing it resets
+      the history, which turns every known finding back into a new one.
+    required: true
+  path:
+    description: Directory inside the repository to package.
+    required: false
+    default: "."
+  gate-on:
+    description: >
+      Which number decides the build: "gate" is the server's own verdict over
+      every finding; "new" fails only on findings this project had never seen,
+      which is what a repository with existing debt wants.
+    required: false
+    default: gate
+  timeout:
+    description: Seconds to wait for the analysis before giving up.
+    required: false
+    default: "1800"
+  poll-interval:
+    description: Seconds between status checks.
+    required: false
+    default: "10"
+  fail-on-gate:
+    description: Fail the step when the verdict is negative.
+    required: false
+    default: "true"
+  upload-sarif:
+    description: >
+      Upload the findings to this repository's Code Scanning. Needs the
+      security-events:write permission.
+    required: false
+    default: "true"
+
+outputs:
+  passed:
+    description: true or false — the verdict this action gated on.
+    value: ${{ steps.gate.outputs.passed }}
+  analysis-id:
+    description: Identifier of the analysis on the server.
+    value: ${{ steps.gate.outputs.analysis_id }}
+  findings:
+    description: Total findings after deduplication.
+    value: ${{ steps.gate.outputs.findings }}
+  new-findings:
+    description: Findings this project had never seen before.
+    value: ${{ steps.gate.outputs.new_findings }}
+  sarif:
+    description: Path to the downloaded SARIF document.
+    value: ${{ steps.gate.outputs.sarif }}
+
+runs:
+  using: composite
+  steps:
+    - id: gate
+      shell: bash
+      env:
+        # Everything travels by environment, never interpolated into the script:
+        # an input expanded inline lands in the runner log verbatim, and one of
+        # these is a credential.
+        CORTEX_URL: ${{ inputs.server-url }}
+        CORTEX_KEY: ${{ inputs.api-key }}
+        CORTEX_PROJECT: ${{ inputs.project }}
+        CORTEX_PATH: ${{ inputs.path }}
+        CORTEX_GATE_ON: ${{ inputs.gate-on }}
+        CORTEX_TIMEOUT: ${{ inputs.timeout }}
+        CORTEX_INTERVAL: ${{ inputs.poll-interval }}
+      run: |
+        set -uo pipefail
+
+        server="${CORTEX_URL%/}"
+        archive="$RUNNER_TEMP/cortex-src.zip"
+        body="$RUNNER_TEMP/cortex-response.json"
+
+        # git archive respects .gitignore and carries no .git directory, so the
+        # server receives the tracked tree and nothing else — no build output,
+        # no local credentials, no history.
+        if ! git archive --format=zip -o "$archive" HEAD -- "$CORTEX_PATH"; then
+          echo "::error::could not package $CORTEX_PATH with git archive"
+          exit 1
+        fi
+        echo "packaged $(du -h "$archive" | cut -f1) from $GITHUB_SHA"
+
+        code=$(curl -sS -o "$body" -w '%{http_code}' \
+          -X POST "$server/api/v1/analyses/upload" \
+          -H "Authorization: Bearer $CORTEX_KEY" \
+          -F "archive=@$archive" \
+          -F "project=$CORTEX_PROJECT" \
+          -F "commit=$GITHUB_SHA" \
+          -F "branch=$GITHUB_REF_NAME" \
+          -F "repository=github.com/$GITHUB_REPOSITORY")
+
+        if [ "$code" != "202" ]; then
+          echo "::error::the server refused the upload (HTTP $code)"
+          jq -r '.error // .' < "$body" 2>/dev/null || cat "$body"
+          exit 1
+        fi
+
+        id=$(jq -r .id < "$body")
+        echo "analysis_id=$id" >> "$GITHUB_OUTPUT"
+        echo "analysis $id queued"
+
+        deadline=$(( $(date +%s) + CORTEX_TIMEOUT ))
+        status=""
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+          sleep "$CORTEX_INTERVAL"
+          code=$(curl -sS -o "$body" -w '%{http_code}' \
+            -H "Authorization: Bearer $CORTEX_KEY" \
+            "$server/api/v1/analyses/$id")
+          if [ "$code" != "200" ]; then
+            echo "::warning::status check returned HTTP $code; retrying"
+            continue
+          fi
+          status=$(jq -r .status < "$body")
+          [ "$status" = "completed" ] || [ "$status" = "failed" ] && break
+          echo "  $status…"
+        done
+
+        if [ "$status" != "completed" ] && [ "$status" != "failed" ]; then
+          echo "::error::the analysis did not finish within ${CORTEX_TIMEOUT}s"
+          exit 1
+        fi
+        if [ "$status" = "failed" ]; then
+          echo "::error::the analysis failed: $(jq -r '.error // "no reason given"' < "$body")"
+          exit 1
+        fi
+
+        gate=$(jq -r '.gate // "unknown"' < "$body")
+        findings=$(jq -r '.findings // 0' < "$body")
+        new=$(jq -r '.new_findings // 0' < "$body")
+        ran=$(jq -r '.scanners_ran // 0' < "$body")
+        errs=$(jq -r '.scanner_errors // {} | length' < "$body")
+
+        echo "findings=$findings"     >> "$GITHUB_OUTPUT"
+        echo "new_findings=$new"      >> "$GITHUB_OUTPUT"
+
+        # The findings report comes back whatever the verdict: a passing build
+        # still has to show what was found.
+        curl -sS -o "$RUNNER_TEMP/cortex.sarif" \
+          -H "Authorization: Bearer $CORTEX_KEY" \
+          "$server/api/v1/analyses/$id/sarif" || true
+        echo "sarif=$RUNNER_TEMP/cortex.sarif" >> "$GITHUB_OUTPUT"
+
+        if [ "$CORTEX_GATE_ON" = "new" ]; then
+          [ "$new" -eq 0 ] && passed=true || passed=false
+          criterion="no new findings"
+        else
+          [ "$gate" = "passed" ] && passed=true || passed=false
+          criterion="the server's Quality Gate"
+        fi
+        echo "passed=$passed" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "## Cortex — security analysis"
+          echo
+          echo "| | |"
+          echo "|---|---|"
+          echo "| Verdict | **$( [ "$passed" = true ] && echo PASSED || echo FAILED )** ($criterion) |"
+          echo "| Quality Gate | $gate |"
+          echo "| Findings | $findings |"
+          echo "| New in this project | $new |"
+          echo "| Scanners that ran | $ran |"
+          [ "$errs" -gt 0 ] && echo "| Scanners that failed | $errs |"
+          echo "| By severity | $(jq -rc '.by_severity // {}' < "$body") |"
+          echo "| Analysis | \`$id\` |"
+          echo
+          # A run where most tools failed must not read as a clean repository.
+          if [ "$errs" -gt 0 ]; then
+            echo "> $errs scanner(s) did not complete. The counts above are"
+            echo "> therefore a floor, not a total."
+            echo
+            jq -r '.scanner_errors // {} | to_entries[] | "- **\(.key)**: \(.value)"' < "$body"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "gate_failed=$( [ "$passed" = true ] && echo 0 || echo 1 )" >> "$GITHUB_ENV"
+
+    - name: Upload SARIF to Code Scanning
+      if: ${{ inputs.upload-sarif == 'true' && steps.gate.outputs.sarif != '' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.gate.outputs.sarif }}
+        category: cortex
+
+    - name: Enforce the verdict
+      if: ${{ inputs.fail-on-gate == 'true' }}
+      shell: bash
+      run: |
+        if [ "${gate_failed:-0}" != "0" ]; then
+          echo "::error::Cortex did not pass; stopping the pipeline"
+          exit 1
+        fi
+        echo "Cortex passed"

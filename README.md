@@ -210,6 +210,7 @@ cannot pass for a clean one.
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/v1/analyses` | analyse a repository (Cortex clones it) |
+| `POST /api/v1/analyses/upload` | analyse an uploaded archive (no access to the repository needed) |
 | `GET /api/v1/analyses` | list, newest first, `?project=` and `?limit=` |
 | `GET /api/v1/analyses/{id}` | status, gate verdict, what changed |
 | `GET /api/v1/analyses/{id}/sarif` | the findings, as SARIF |
@@ -255,6 +256,60 @@ work without changing the number anybody looks at.
 Deploy it with [`docs/examples/docker-compose.server.yml`](docs/examples/docker-compose.server.yml)
 and [`docs/examples/server.yaml`](docs/examples/server.yaml). Put a TLS-terminating
 proxy in front: the API keys travel in a header.
+
+### The pipeline sends the code: no access to the repository at all
+
+Cloning needs a credential for the client's forge. Plenty of clients will never
+issue one, and asking is often the end of the conversation. The other direction
+removes the question: the pipeline packages the tree it is building, posts it,
+and blocks on the answer.
+
+```yaml
+- uses: actions/checkout@v4
+- uses: VektCore/cortex/upload-gate@main
+  with:
+    server-url: https://sast.example.com
+    api-key: ${{ secrets.CORTEX_API_KEY }}
+    project: acme-api
+    gate-on: new
+```
+
+The action packages with `git archive`, so the server receives the tracked tree
+and nothing else — no `.git`, no build output, no local credentials. It uploads,
+polls, writes the findings to the job summary, pushes the SARIF to the client's
+own Code Scanning, and exits non-zero when the verdict is negative. The report
+arrives whether the build passes or fails; a green run still has to show what
+was found. Full example in
+[`docs/examples/github-actions-upload-gate.yml`](docs/examples/github-actions-upload-gate.yml).
+
+Enable it in `server.yaml` — off by default, because a deployment that only
+clones should not also accept archives it never asked for:
+
+```yaml
+server:
+  upload:
+    enabled: true
+    max_archive_bytes: 268435456      # 256 MiB, refused while still streaming
+    max_extracted_bytes: 2147483648   # 2 GiB, the guard against a zip bomb
+    max_entries: 200000               # inodes, which no size limit protects
+```
+
+Those limits are the security posture of the endpoint: an authenticated client
+can otherwise fill the disk with one request. The extractor refuses an entry
+that escapes the destination rather than sanitising it — a rewritten
+`../../etc/passwd` would be scanned as if it were the client's own source — and
+drops symlinks instead of recreating them, reporting how many, because a
+dropped entry is source the scanners did not see. The archive is deleted as
+soon as the analysis ends: a server that keeps them becomes a copy of every
+repository it has ever been shown.
+
+**What this costs.** An uploaded tree has no `.git`, so gitleaks cannot reach
+commit history and Semgrep cannot narrow itself to tracked files — whatever the
+archive contains is scanned, which is why `exclude` matters more here. The
+revision is whatever the pipeline declared: `commit` and `branch` are form
+fields, and an analysis that declares neither honestly reports an unknown
+revision rather than inventing one. In exchange, the scan covers exactly the
+commit being built, with no clone race and no credential to revoke.
 
 ### Managed mode: keeping the history on a server
 

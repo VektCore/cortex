@@ -10,6 +10,7 @@
 //
 //	GET  /healthz                                    liveness, unauthenticated
 //	POST /api/v1/analyses                            analyse a repository
+//	POST /api/v1/analyses/upload                     analyse an uploaded archive
 //	GET  /api/v1/analyses                            list, newest first
 //	GET  /api/v1/analyses/{id}                       one analysis
 //	GET  /api/v1/analyses/{id}/sarif                 its SARIF document
@@ -87,6 +88,10 @@ func (s *Server) Clients() int { return len(s.auth.keys) }
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/analyses", s.handleAnalyses)
+	// Registered before the {id} prefix pattern and more specific than it, so
+	// the mux routes /analyses/upload here rather than treating "upload" as an
+	// analysis id.
+	s.mux.HandleFunc(uploadPath, s.handleUploadAnalysis)
 	s.mux.HandleFunc("/api/v1/analyses/", s.handleAnalysisByID)
 	s.mux.HandleFunc("/api/v1/scans", s.handleIngestScan)
 	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectState)
@@ -145,6 +150,7 @@ func (s *Server) createAnalysis(w http.ResponseWriter, r *http.Request) {
 	analysis := Analysis{
 		ID:          RandomID(),
 		Project:     req.Project,
+		Source:      SourceGit,
 		Repository:  req.Repository,
 		Ref:         strings.TrimSpace(req.Ref),
 		Status:      StatusQueued,

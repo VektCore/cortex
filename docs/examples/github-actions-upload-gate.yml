@@ -1,0 +1,50 @@
+# The pipeline sends the code out and blocks on the answer.
+#
+# This is the shape for a client who will not grant access to its repositories:
+# nothing is installed, no scanner runs here, and the Cortex server never
+# reaches back into this forge. The job packages the tracked tree, posts it,
+# waits, publishes the findings either way, and fails when the verdict is
+# negative — so the pipeline stops before the code that did not pass is shipped.
+#
+# The one secret is the API key. There is no clone credential to hand over.
+
+name: Security gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  # Only for the Code Scanning upload. Drop it, and set upload-sarif: false,
+  # if the findings should live on the Cortex server alone.
+  security-events: write
+
+concurrency:
+  group: security-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cortex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: VektCore/cortex/upload-gate@main
+        with:
+          server-url: https://sast.example.com
+          api-key: ${{ secrets.CORTEX_API_KEY }}
+          # Stable for the life of the repository. Change it and the finding
+          # history restarts, which turns every known issue back into a new one.
+          project: acme-api
+
+          # "new" fails only on findings this project had never seen. Start
+          # here on a repository with existing debt: gating on the whole
+          # backlog fails the first build and teaches everyone to skip the job.
+          # Move to "gate" once the backlog is triaged.
+          gate-on: new
+
+          timeout: "1800"
+          fail-on-gate: "true"
+          upload-sarif: "true"
