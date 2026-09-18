@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -211,6 +212,15 @@ func TestFileStore_SurvivesAReopen(t *testing.T) {
 
 func TestFileStore_IsNotWorldReadable(t *testing.T) {
 	t.Parallel()
+
+	// Windows has no POSIX permission bits — Go reports 0666 there whatever
+	// the file was created with, and access is governed by ACLs instead. The
+	// property is real on the platform the server runs on; asserting it on
+	// Windows would only be asserting Go's emulation.
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not meaningful on Windows")
+	}
+
 	store, dir := newStore(t)
 
 	_, _, err := store.Issue(context.Background(), "acme", 90*day, time.Now())
