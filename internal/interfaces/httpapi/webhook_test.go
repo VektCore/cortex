@@ -21,9 +21,21 @@ import (
 const webhookSecret = "s3cr3t-webhook"
 
 func newWebhookServer(t *testing.T, branches ...string) http.Handler {
+	return webhookServer(t, nil, branches...)
+}
+
+// newWebhookAdminServer grants test-client operator access. A webhook delivery
+// carries a signature, not a key, so the analysis it queues belongs to no
+// client — reading one back is something only an operator can do.
+func newWebhookAdminServer(t *testing.T, branches ...string) http.Handler {
+	return webhookServer(t, []string{"test-client"}, branches...)
+}
+
+func webhookServer(t *testing.T, admins []string, branches ...string) http.Handler {
 	t.Helper()
 
 	cfg := &config.Config{}
+	cfg.Server.AdminClients = admins
 	cfg.Server.DataDir = t.TempDir()
 	cfg.Server.Workers = 1
 	cfg.Server.APIKeys = []config.APIKey{{Name: "test-client", Key: testKey}}
@@ -123,8 +135,9 @@ func TestWebhook_QueuesAnalysisOnPush(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.NotEmpty(t, got["id"])
 	assert.Equal(t, "master", got["branch"])
-	assert.Equal(t, "punixxher-financeApp", got["project"],
-		"one repository is one project, whatever triggered the analysis")
+	assert.Equal(t, "cortex:github-webhook/punixxher-financeApp", got["project"],
+		"one repository is one project, in the reserved namespace a delivery "+
+			"owns — no API client can authenticate as it, deliberately or not")
 }
 
 // GitHub sends a ping when the webhook is created; answering it is how the
@@ -208,7 +221,9 @@ func TestWebhook_PrivateRepositoryIsClonedOverSSH(t *testing.T) {
 	t.Setenv("CORTEX_GIT_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("GITLAB_TOKEN", "")
-	h := newWebhookServer(t)
+	// A delivery is owned by the reserved webhook owner, which no API key can
+	// authenticate as, so reading the queued record back takes operator access.
+	h := newWebhookAdminServer(t)
 
 	body := pushBody("master", "acme/private-api", true)
 	rec := deliver(t, h, "push", body, sign(webhookSecret, body))
@@ -227,7 +242,9 @@ func TestWebhook_PrivateRepositoryIsClonedOverSSH(t *testing.T) {
 
 func TestWebhook_PrivateRepositoryUsesHTTPSWhenATokenExists(t *testing.T) {
 	t.Setenv("CORTEX_GIT_TOKEN", "ghp_a_token")
-	h := newWebhookServer(t)
+	// A delivery is owned by the reserved webhook owner, which no API key can
+	// authenticate as, so reading the queued record back takes operator access.
+	h := newWebhookAdminServer(t)
 
 	body := pushBody("master", "acme/private-api", true)
 	rec := deliver(t, h, "push", body, sign(webhookSecret, body))
@@ -237,6 +254,8 @@ func TestWebhook_PrivateRepositoryUsesHTTPSWhenATokenExists(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &queued))
 
 	stored := do(t, h, http.MethodGet, "/api/v1/analyses/"+queued["id"], "", testKey)
+	require.Equal(t, http.StatusOK, stored.Code, stored.Body.String())
+
 	var analysis httpapi.Analysis
 	require.NoError(t, json.Unmarshal(stored.Body.Bytes(), &analysis))
 

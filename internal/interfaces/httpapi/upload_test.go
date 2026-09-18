@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -185,7 +186,7 @@ func TestUpload_QueuesTheAnalysis(t *testing.T) {
 	var a httpapi.Analysis
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &a))
 	assert.Equal(t, httpapi.SourceUpload, a.Source)
-	assert.Equal(t, "acme-api", a.Project)
+	assert.Equal(t, "test-client/acme-api", a.Project)
 	assert.Equal(t, "9f2a1c4e8b7d6a5f4e3c2b1a0987654321fedcba", a.Commit)
 	assert.Equal(t, "main", a.Ref)
 	assert.Equal(t, "test-client", a.RequestedBy)
@@ -205,8 +206,15 @@ func TestUpload_SanitisesTheProjectName(t *testing.T) {
 
 	var a httpapi.Analysis
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &a))
-	assert.NotContains(t, a.Project, "/")
-	assert.NotContains(t, a.Project, "..")
+
+	// The key is "<owner>/<name>" now, so the one separator the owner scope
+	// adds is expected; what must not survive is anything in the name that
+	// could climb out of the data directory.
+	_, name, found := strings.Cut(a.Project, "/")
+	require.True(t, found)
+	assert.Equal(t, "test-client", strings.TrimSuffix(a.Project, "/"+name))
+	assert.NotContains(t, name, "/")
+	assert.NotContains(t, name, "..")
 }
 
 func TestUpload_IsPostOnly(t *testing.T) {

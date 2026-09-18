@@ -52,6 +52,10 @@ func (s *Server) handleUploadAnalysis(w http.ResponseWriter, r *http.Request) {
 			"archive upload is disabled; set server.upload.enabled to true")
 		return
 	}
+	who, ok := s.callerFrom(w, r)
+	if !ok {
+		return
+	}
 
 	id := RandomID()
 	// Bound the whole request, not just the file part: the ceiling has to hold
@@ -66,14 +70,19 @@ func (s *Server) handleUploadAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 
 	analysis := Analysis{
-		ID:          id,
-		Project:     sanitizeSegment(form.project),
+		ID:    id,
+		Owner: who.name,
+		// The project name is form data, so it is resolved inside the caller's
+		// namespace. Before this, uploading under a name another client uses
+		// reconciled these findings into that client's history and rewrote
+		// what their next quality gate called new.
+		Project:     projectKey(who.name, form.project),
 		Source:      SourceUpload,
 		Repository:  form.repository,
 		Ref:         form.branch,
 		Commit:      form.commit,
 		Status:      StatusQueued,
-		RequestedBy: r.Header.Get(clientNameHeader),
+		RequestedBy: who.name,
 		QueuedAt:    time.Now().UTC(),
 	}
 
@@ -155,15 +164,21 @@ func (s *Server) storeArchive(part *multipart.Part, id string, maxArchive int64)
 	}
 	defer func() { _ = file.Close() }()
 
+	// Both failures below are answered generically for the same reason the
+	// open above is: the wrapped error is an *os.PathError naming the server's
+	// data directory, and this message is returned to the caller verbatim.
 	written, err := io.Copy(file, io.LimitReader(part, maxArchive+1))
 	if err != nil {
-		return 0, fmt.Errorf("read archive: %w", err)
+		s.logger.Error("could not write the uploaded archive", logField("error", err.Error()))
+		return 0, errors.New("could not store the archive")
 	}
 	if written > maxArchive {
 		return 0, fmt.Errorf("archive exceeds the %d byte limit", maxArchive)
 	}
 	if closeErr := file.Close(); closeErr != nil {
-		return 0, fmt.Errorf("store archive: %w", closeErr)
+		s.logger.Error("could not finish the uploaded archive",
+			logField("error", closeErr.Error()))
+		return 0, errors.New("could not store the archive")
 	}
 	return written, nil
 }

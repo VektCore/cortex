@@ -31,7 +31,8 @@ func TestReport_JSONFieldNamesAreTheClientContract(t *testing.T) {
 	started := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
 	encoded, err := json.Marshal(analyses.Report{
 		ID:            "a1",
-		Project:       "acme",
+		Owner:         "acme-corp",
+		Project:       "acme-corp/acme",
 		Source:        "git",
 		Repository:    "git@example.com:acme/app.git",
 		Ref:           "refs/heads/main",
@@ -58,7 +59,7 @@ func TestReport_JSONFieldNamesAreTheClientContract(t *testing.T) {
 	require.NoError(t, json.Unmarshal(encoded, &fields))
 
 	for _, name := range []string{
-		"id", "project", "source", "repository", "ref", "commit", "status", "gate",
+		"id", "owner", "project", "source", "repository", "ref", "commit", "status", "gate",
 		"findings", "by_severity", "new_findings", "reopened", "resolved",
 		"scanners_ran", "scanner_errors", "known_before", "requested_by", "error",
 		"queued_at", "started_at", "finished_at",
@@ -83,7 +84,7 @@ func TestReport_OptionalFieldsAreOmittedWhileTheyAreUnknown(t *testing.T) {
 
 	for _, name := range []string{
 		"gate", "error", "started_at", "finished_at", "by_severity",
-		"scanner_errors", "repository", "ref", "commit", "requested_by",
+		"scanner_errors", "repository", "ref", "commit", "requested_by", "owner",
 	} {
 		assert.NotContains(t, fields, name)
 	}

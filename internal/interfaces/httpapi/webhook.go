@@ -108,9 +108,16 @@ func (s *Server) queuePush(w http.ResponseWriter, r *http.Request, body []byte) 
 		return
 	}
 
+	// A delivery carries a signature, not an API key, so no client owns this
+	// run — see webhookOwner in tenancy.go for why it goes to a reserved owner
+	// rather than to whichever client happens to have a project of the same
+	// name. RequestedBy keeps saying "github-webhook" because that is what it
+	// is for: who asked, not whose data it is.
 	analysis := Analysis{
-		ID:          RandomID(),
-		Project:     sanitizeSegment(strings.ReplaceAll(push.Repository.FullName, "/", "-")),
+		ID:    RandomID(),
+		Owner: webhookOwner,
+		Project: projectKey(webhookOwner,
+			strings.ReplaceAll(push.Repository.FullName, "/", "-")),
 		Source:      SourceGit,
 		Repository:  cloneURLFor(push, gitinfra.HasToken()),
 		Ref:         branch,

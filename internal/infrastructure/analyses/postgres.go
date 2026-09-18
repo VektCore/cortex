@@ -27,6 +27,7 @@ import (
 const schema = `
 CREATE TABLE IF NOT EXISTS cortex_analyses (
     id             TEXT PRIMARY KEY,
+    owner          TEXT NOT NULL DEFAULT '',
     project        TEXT NOT NULL,
     source         TEXT NOT NULL,
     repository     TEXT NOT NULL DEFAULT '',
@@ -54,6 +55,15 @@ CREATE INDEX IF NOT EXISTS cortex_analyses_project_idx
 CREATE INDEX IF NOT EXISTS cortex_analyses_queued_idx
     ON cortex_analyses (queued_at DESC);
 
+-- Added after the table shipped, so it is an ALTER as well as a column in the
+-- CREATE above: a database written by an earlier build already has the table
+-- and would never see the new column otherwise. Existing rows default to the
+-- empty owner, which is nobody's — every client reads them as absent, which is
+-- the direction to fail in. See the deployment note in the handover.
+ALTER TABLE cortex_analyses ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS cortex_analyses_owner_idx
+    ON cortex_analyses (owner, queued_at DESC);
+
 CREATE TABLE IF NOT EXISTS cortex_project_state (
     project    TEXT PRIMARY KEY,
     document   BYTEA NOT NULL,
@@ -66,7 +76,7 @@ CREATE TABLE IF NOT EXISTS cortex_project_state (
 // pull every SARIF the project ever produced through the connection to show a
 // page of counts.
 const analysisColumns = `
-    id, project, source, repository, ref, commit_sha, status, gate,
+    id, owner, project, source, repository, ref, commit_sha, status, gate,
     findings, by_severity, new_findings, reopened, resolved, known_before,
     scanners_ran, scanner_errors, requested_by, error,
     queued_at, started_at, finished_at`
@@ -78,17 +88,18 @@ const analysisColumns = `
 // run just produced.
 const upsertAnalysisStmt = `
 INSERT INTO cortex_analyses (
-    id, project, source, repository, ref, commit_sha, status, gate,
+    id, owner, project, source, repository, ref, commit_sha, status, gate,
     findings, by_severity, new_findings, reopened, resolved, known_before,
     scanners_ran, scanner_errors, requested_by, error,
     queued_at, started_at, finished_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8,
-    $9, $10, $11, $12, $13, $14,
-    $15, $16, $17, $18,
-    $19, $20, $21
+    $1, $2, $3, $4, $5, $6, $7, $8, $9,
+    $10, $11, $12, $13, $14, $15,
+    $16, $17, $18, $19,
+    $20, $21, $22
 )
 ON CONFLICT (id) DO UPDATE SET
+    owner = EXCLUDED.owner,
     project = EXCLUDED.project,
     source = EXCLUDED.source,
     repository = EXCLUDED.repository,
@@ -160,7 +171,8 @@ func (s *PostgresStore) SaveAnalysis(ctx context.Context, report Report) error {
 	}
 
 	_, err = s.pool.Exec(ctx, upsertAnalysisStmt,
-		report.ID, report.Project, report.Source, report.Repository, report.Ref,
+		report.ID, report.Owner, report.Project,
+		report.Source, report.Repository, report.Ref,
 		report.Commit, report.Status, report.Gate,
 		report.Findings, bySeverity, report.NewFindings, report.Reopened,
 		report.Resolved, report.KnownBefore,
@@ -188,11 +200,19 @@ func (s *PostgresStore) LoadAnalysis(ctx context.Context, id string) (Report, bo
 	return report, true, nil
 }
 
-// ListAnalyses returns records newest first. An empty project means every
-// project, and a limit of zero or less means no limit — passed as SQL NULL,
-// which LIMIT reads as "all", rather than by building a second statement.
+// ListAnalyses returns records newest first.
+//
+// owner is the tenant filter and is the only thing standing between a client
+// and every other client's report history, so it is applied in SQL rather than
+// by the caller: a listing that fetched everything and filtered afterwards
+// would be one forgotten branch away from the bug this replaced. An empty
+// owner means every owner and is reachable only by an operator.
+//
+// An empty project means every project of that owner, and a limit of zero or
+// less means no limit — passed as SQL NULL, which LIMIT reads as "all", rather
+// than by building a second statement.
 func (s *PostgresStore) ListAnalyses(
-	ctx context.Context, project string, limit int,
+	ctx context.Context, owner, project string, limit int,
 ) ([]Report, error) {
 	var pageLimit *int
 	if limit > 0 {
@@ -202,9 +222,10 @@ func (s *PostgresStore) ListAnalyses(
 	rows, err := s.pool.Query(ctx,
 		`SELECT`+analysisColumns+`
 		FROM cortex_analyses
-		WHERE $1 = '' OR project = $1
+		WHERE ($1 = '' OR owner = $1)
+		  AND ($2 = '' OR project = $2)
 		ORDER BY queued_at DESC, id DESC
-		LIMIT $2`, project, pageLimit)
+		LIMIT $3`, owner, project, pageLimit)
 	if err != nil {
 		return nil, fmt.Errorf("list analyses: %w", err)
 	}
@@ -276,6 +297,10 @@ func (s *PostgresStore) ReadProjectState(
 
 // WriteProjectState replaces the project's document.
 //
+// The project argument is the owner-scoped key ("<owner>/<name>"), the same
+// one Analysis.Project carries, so the primary key is per tenant and not per
+// name. A bare name here would let two clients share one row.
+//
 // The primary key is the project, so each one keeps its own history. Sharing a
 // row would make every finding of the next project look new and every finding
 // of the previous one resolved. The document is stored as bytes, not JSONB,
@@ -312,7 +337,8 @@ func scanReport(row scanRow) (Report, error) {
 	var started, finished *time.Time
 
 	if err := row.Scan(
-		&report.ID, &report.Project, &report.Source, &report.Repository, &report.Ref,
+		&report.ID, &report.Owner, &report.Project,
+		&report.Source, &report.Repository, &report.Ref,
 		&report.Commit, &report.Status, &report.Gate,
 		&report.Findings, &bySeverity, &report.NewFindings, &report.Reopened,
 		&report.Resolved, &report.KnownBefore,

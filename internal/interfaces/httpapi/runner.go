@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,13 @@ const (
 	analysisTimeout = 45 * time.Minute
 	// shutdownGrace is how long Stop waits for in-flight work.
 	shutdownGrace = 30 * time.Second
+	// queueDepth bounds the pending analyses. A full queue rejects new work
+	// with 503 instead of letting the box accept thousands of clones it will
+	// never get to. It counts analyses, not bytes — archiveBacklog does that.
+	queueDepth = 256
+	// shutdownReason is what an analysis that never started is failed with. A
+	// client polling it gets the truth rather than "queued" forever.
+	shutdownReason = "interrupted: the server shut down before this analysis started"
 )
 
 // Runner executes queued analyses: obtain the source, scan, aggregate, gate,
@@ -47,6 +55,12 @@ type Runner struct {
 	records analysisRecords
 	logger  ports.Logger
 	queue   chan string
+	// backlog bounds the uploaded source held on disk by everything queued or
+	// in flight, and is also how the sweeper knows which archives this process
+	// still intends to run.
+	backlog *archiveBacklog
+	// projects serialises reconciliation per project state file.
+	projects *projectLocks
 	// ctx is cancelled on Stop, which aborts the clone and the scanners of an
 	// in-flight analysis rather than leaving them orphaned.
 	ctx    context.Context
@@ -54,7 +68,18 @@ type Runner struct {
 	wg     sync.WaitGroup
 }
 
-// NewRunner starts `workers` goroutines draining the queue.
+// NewRunner starts `workers` goroutines draining the queue, plus the sweeper
+// that reclaims what an earlier process left on disk.
+// backlogBudget takes the operator's ceiling, falling back to the built-in one
+// only when upload is disabled and the config layer therefore never validated
+// it.
+func backlogBudget(cfg *config.Config) int64 {
+	if cfg.Server.Upload.MaxBacklogBytes > 0 {
+		return cfg.Server.Upload.MaxBacklogBytes
+	}
+	return defaultArchiveBacklogBytes
+}
+
 func NewRunner(
 	cfg *config.Config, store *Store, records analysisRecords,
 	logger ports.Logger, workers int,
@@ -62,33 +87,66 @@ func NewRunner(
 	if workers < 1 {
 		workers = 1
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	r := &Runner{
-		cfg:     cfg,
-		store:   store,
-		records: records,
-		logger:  logger,
-		// Bounded: a full queue rejects new work with 503 instead of letting
-		// the box accept thousands of clones it will never get to.
-		queue:  make(chan string, 256),
-		ctx:    ctx,
-		cancel: cancel,
-	}
+	r := newRunner(cfg, store, records, logger)
+
 	r.wg.Add(workers)
 	for i := 0; i < workers; i++ {
 		go r.work()
 	}
+	r.wg.Add(1)
+	go r.sweep()
+
 	return r
 }
 
-// Enqueue schedules an analysis by id. It reports false when the queue is full.
+// newRunner assembles a runner without starting any goroutine. Separate from
+// NewRunner so a test can drive one step at a time instead of racing a pool.
+func newRunner(
+	cfg *config.Config, store *Store, records analysisRecords, logger ports.Logger,
+) *Runner {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Runner{
+		cfg:      cfg,
+		store:    store,
+		records:  records,
+		logger:   logger,
+		queue:    make(chan string, queueDepth),
+		backlog:  newArchiveBacklog(backlogBudget(cfg)),
+		projects: newProjectLocks(),
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+}
+
+// Enqueue schedules an analysis by id. It reports false when the queue is full,
+// or when the source already waiting on disk would take the backlog over
+// budget — both of which the caller turns into a 503 and a deleted archive.
 func (r *Runner) Enqueue(id string) bool {
+	if !r.backlog.reserve(id, r.archiveBytes(id)) {
+		r.logger.Warn("refusing an analysis: the queued archives fill the disk budget",
+			ports.F("id", id),
+			ports.F("budget_bytes", fmt.Sprint(r.backlog.budget)))
+		return false
+	}
+
 	select {
 	case r.queue <- id:
 		return true
 	default:
+		r.backlog.release(id)
 		return false
 	}
+}
+
+// archiveBytes is how much disk this analysis already holds. A git analysis
+// holds none, and an archive that cannot be stat'd is charged nothing rather
+// than refused: the runner is not the component that validates an upload.
+func (r *Runner) archiveBytes(id string) int64 {
+	info, err := os.Stat(r.store.ArchivePath(id))
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 // Stop cancels in-flight analyses and waits for the workers to return.
@@ -115,6 +173,51 @@ func (r *Runner) Stop() {
 		r.logger.Warn("workers did not stop in time; abandoning them",
 			ports.F("grace", shutdownGrace.String()))
 	}
+
+	// Whatever never reached a worker is closed out here. Dropped on the floor,
+	// those analyses stay "queued" in the store with nothing left to run them,
+	// and the source their clients uploaded stays on disk for good.
+	r.drain()
+}
+
+// drain empties the queue, failing every analysis that never started.
+//
+// It runs after the workers have returned. If the grace expired and they were
+// abandoned instead, a worker may still be taking ids alongside this loop —
+// harmless, because a channel hands each id to exactly one receiver.
+func (r *Runner) drain() {
+	for {
+		select {
+		case id := <-r.queue:
+			r.abandon(id, shutdownReason)
+		default:
+			return
+		}
+	}
+}
+
+// abandon closes out an analysis nothing will ever run: the record says what
+// happened and the uploaded source is dropped.
+//
+// Safe on an id that already finished — a terminal record is left as it is, and
+// removing an archive that is not there is not an error.
+func (r *Runner) abandon(id, reason string) {
+	defer r.removeArchive(id)
+	r.backlog.release(id)
+
+	analysis, found, err := r.records.LoadAnalysis(context.Background(), id)
+	if err != nil || !found {
+		return
+	}
+	if analysis.Status == StatusCompleted || analysis.Status == StatusFailed {
+		return
+	}
+
+	finished := time.Now().UTC()
+	analysis.Status = StatusFailed
+	analysis.Error = reason
+	analysis.FinishedAt = &finished
+	r.persist(analysis)
 }
 
 func (r *Runner) work() {
@@ -124,6 +227,13 @@ func (r *Runner) work() {
 		case <-r.ctx.Done():
 			return
 		case id := <-r.queue:
+			// Both cases can be ready at once and select picks between them at
+			// random, so a cancelled runner would otherwise start an analysis
+			// it is about to interrupt. Stop drains what is left behind us.
+			if r.ctx.Err() != nil {
+				r.abandon(id, shutdownReason)
+				return
+			}
 			r.run(id)
 		}
 	}
@@ -132,17 +242,21 @@ func (r *Runner) work() {
 // run executes one analysis, recording every outcome — including failure — on
 // the record the client polls.
 func (r *Runner) run(id string) {
+	// The archive holds the client's source, and it is dropped on every exit
+	// path — including the one right below, which gives up before there is an
+	// analysis to ask about the source. Registered first for exactly that
+	// reason: it used to sit after the load, so a record that would not load
+	// left the upload in archives/ for the life of the volume.
+	//
+	// Unconditional because a git analysis simply has no archive, and removing
+	// one that was never created is not an error.
+	defer r.removeArchive(id)
+	defer r.backlog.release(id)
+
 	analysis, found, err := r.records.LoadAnalysis(context.Background(), id)
 	if err != nil || !found {
 		r.logger.Error("analysis vanished from the store", ports.F("id", id))
 		return
-	}
-
-	// The archive holds the client's source. It is dropped on every exit path,
-	// including a failed scan, so the data directory never becomes a copy of
-	// every repository the service has seen.
-	if analysis.Source == SourceUpload {
-		defer r.removeArchive(id)
 	}
 
 	started := time.Now().UTC()
@@ -381,7 +495,20 @@ func (r *Runner) resolveRevision(analysis *Analysis, scanned scan.Revision) scan
 func (r *Runner) reconcile(
 	ctx context.Context, analysis *Analysis, findings []finding.Finding,
 ) error {
-	store := bootstrap.StoreAt(r.store.ProjectStatePath(analysis.Project))
+	path := r.store.ProjectStatePath(analysis.Project)
+
+	// One JSON document per project, read-modify-written by every analysis of
+	// it. Two workers on the same project both load the old history, and the
+	// second save drops whatever the first recorded: Save is atomic per write,
+	// which prevents a half-written file, not a lost update. Keyed by the path
+	// rather than the project name, so two names that sanitise to the same file
+	// are recognised as the same history.
+	//
+	// In-process only. See projectLocks for what that does not cover.
+	release := r.projects.acquire(path)
+	defer release()
+
+	store := bootstrap.StoreAt(path)
 
 	resp, err := bootstrap.ReconcileWith(store, r.logger).
 		Execute(ctx, dto.ReconcileRequest{Findings: findings, Persist: true}).Get()

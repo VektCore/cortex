@@ -16,7 +16,18 @@ import "time"
 // be a second source of truth for a decision only one system is allowed to
 // make. What survives the run is the counts and the SARIF document.
 type Report struct {
-	ID      string `json:"id"`
+	ID string `json:"id"`
+	// Owner is the client the record belongs to. It is what scopes every read
+	// of this table to one tenant, and it is separate from RequestedBy on
+	// purpose: RequestedBy is audit text that may say anything, while this is
+	// an access-control decision.
+	//
+	// An empty owner is a row written before ownership existed. It is nobody's
+	// and is served to nobody but an operator.
+	Owner string `json:"owner,omitempty"`
+	// Project is the owner-scoped key ("<owner>/<name>"), because project
+	// names are caller-chosen and a global namespace let two clients share —
+	// and overwrite — one finding history.
 	Project string `json:"project"`
 	// Source decides what the rest of the row can be trusted to say: an
 	// uploaded archive carries no git metadata of its own, so Repository, Ref

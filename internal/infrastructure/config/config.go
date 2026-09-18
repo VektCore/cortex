@@ -84,6 +84,12 @@ type ServerConfig struct {
 	// published so a finding can be traced back to the engine that produced
 	// it. It comes from ldflags at startup, never from the config file.
 	EngineVersion string `mapstructure:"-"`
+	// AdminClients are the client names allowed to see every tenant's work.
+	//
+	// Off by default and never inferrable from a key: an operator names them
+	// here deliberately. Anything else turns "this credential happens to be
+	// ours" into privilege.
+	AdminClients []string `mapstructure:"admin_clients"`
 	// Platform pushes finished analyses into VektCore_Platform, where the
 	// findings get a lifecycle, triage and a UI. Cortex keeps the record of
 	// what the scan found; the platform keeps what the team decided about it.
@@ -133,6 +139,11 @@ type UploadConfig struct {
 	// MaxEntries caps the file count, because a million empty files exhausts
 	// inodes without ever tripping a size limit.
 	MaxEntries int `mapstructure:"max_entries"`
+	// MaxBacklogBytes caps the uploaded source allowed to sit on disk waiting
+	// for a worker. The queue counts analyses, not bytes, and disk is the
+	// resource that actually runs out: 256 slots against a 256 MiB upload
+	// limit admits some 64 GiB of client source ahead of two workers.
+	MaxBacklogBytes int64 `mapstructure:"max_backlog_bytes"`
 }
 
 // GitHubConfig configures publishing results back to GitHub.
@@ -279,7 +290,39 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	if err := cfg.Server.Upload.validate(); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validate refuses an upload ceiling that is not a ceiling.
+//
+// Every one of these has a positive default, so a non-positive value can only
+// come from an operator writing it. Repairing it silently is the dangerous
+// option: substituting the default *widens* a limit somebody believed they had
+// tightened, and nothing says so until the archive that exploits it arrives.
+// Failing here means it is caught at startup, with an operator watching.
+func (u UploadConfig) validate() error {
+	if !u.Enabled {
+		return nil
+	}
+	for _, limit := range []struct {
+		key   string
+		value int64
+	}{
+		{"max_archive_bytes", u.MaxArchiveBytes},
+		{"max_extracted_bytes", u.MaxExtractedBytes},
+		{"max_entries", int64(u.MaxEntries)},
+		{"max_backlog_bytes", u.MaxBacklogBytes},
+	} {
+		if limit.value <= 0 {
+			return fmt.Errorf(
+				"server.upload.%s must be positive, got %d: a zero here would be read "+
+					"as no limit at all", limit.key, limit.value)
+		}
+	}
+	return nil
 }
 
 func applyDefaults(v *viper.Viper) {
@@ -309,6 +352,7 @@ func applyDefaults(v *viper.Viper) {
 	v.SetDefault("server.upload.max_archive_bytes", 256<<20)
 	v.SetDefault("server.upload.max_extracted_bytes", 2<<30)
 	v.SetDefault("server.upload.max_entries", 200_000)
+	v.SetDefault("server.upload.max_backlog_bytes", 4<<30)
 	v.SetDefault("server.database", "")
 	v.SetDefault("server.api_key_ttl", "90d")
 	v.SetDefault("server.platform.base_url", "")

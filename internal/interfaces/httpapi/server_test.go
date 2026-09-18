@@ -135,7 +135,8 @@ func TestCreateAnalysis_AcceptsAGitURLAndQueuesIt(t *testing.T) {
 	var a httpapi.Analysis
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &a))
 	assert.NotEmpty(t, a.ID)
-	assert.Equal(t, "acme", a.Project)
+	assert.Equal(t, "test-client/acme", a.Project,
+		"a project belongs to the client that named it, not to the server")
 	assert.Equal(t, httpapi.StatusQueued, a.Status)
 	assert.Equal(t, "test-client", a.RequestedBy,
 		"work is attributed to the named client, never to a raw key")
@@ -156,7 +157,7 @@ func TestCreateAnalysis_DerivesAStableProject(t *testing.T) {
 	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &a))
 	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &b))
 
-	assert.Equal(t, "org-repo", a.Project)
+	assert.Equal(t, "test-client/org-repo", a.Project)
 	assert.Equal(t, a.Project, b.Project,
 		"the same repository in two URL forms is one project, not two")
 }

@@ -33,7 +33,25 @@ const (
 // It is deliberately flat and JSON-shaped: this is what a client polls, so its
 // field names are a public contract.
 type Analysis struct {
-	ID      string `json:"id"`
+	ID string `json:"id"`
+	// Owner is the client this record belongs to, and the only field
+	// authorisation reads. See tenancy.go for why it is not RequestedBy.
+	//
+	// Empty means nobody: a record written before ownership existed. Those are
+	// readable only by an operator, because the safe reading of "unowned" is
+	// "nobody's", never "everybody's".
+	Owner string `json:"owner,omitempty"`
+	// Project is the owner-scoped key the finding history is kept under:
+	// "<owner>/<name>", where <name> is the sanitised name the client asked
+	// for. Project names are caller-chosen, so a global namespace let one
+	// client read, merge into and overwrite another's history simply by
+	// guessing the name.
+	//
+	// The composite is stored in this one field rather than assembled where it
+	// is used because Runner.reconcile derives the state path from it: the
+	// scoping has to travel with the record, or the worker would reconcile a
+	// tenant's findings into the global name after the handler had carefully
+	// scoped it.
 	Project string `json:"project"`
 	// Source says where the code came from: SourceGit, which the server clones,
 	// or SourceUpload, which the client's pipeline sent as an archive. It
@@ -99,8 +117,12 @@ func (s *Store) SarifPath(id string) string {
 }
 
 // ScanPath is where an ingested SARIF (posted by a client's own CI) lives.
-func (s *Store) ScanPath(id string) string {
-	return filepath.Join(s.root, "scans", id+".sarif")
+//
+// Scoped by owner because the id is caller-supplied: POST /api/v1/scans takes
+// X-Scan-ID, so a global "scans/<id>.sarif" let anyone with a valid key
+// overwrite any other client's ingested document by naming their id.
+func (s *Store) ScanPath(owner, id string) string {
+	return filepath.Join(s.root, "scans", ownerSegment(owner), id+".sarif")
 }
 
 // WorkDir is where uploaded archives are expanded. It lives under the data
@@ -108,6 +130,12 @@ func (s *Store) ScanPath(id string) string {
 // and a source tree of a few hundred megabytes has to land somewhere real.
 func (s *Store) WorkDir() string {
 	return filepath.Join(s.root, "work")
+}
+
+// ArchiveDir is where uploaded archives wait for a worker. The sweeper needs
+// the directory itself, not one path inside it.
+func (s *Store) ArchiveDir() string {
+	return filepath.Join(s.root, "archives")
 }
 
 // ArchivePath is where an uploaded source archive is parked between the
@@ -143,11 +171,27 @@ func (s *Store) RemoveArchive(id string) error {
 	return nil
 }
 
-// ProjectStatePath is the vulnerability state file for a project. Each project
-// gets its own: sharing one would make every finding of the next project look
-// new and every finding of the previous one resolved.
-func (s *Store) ProjectStatePath(project string) string {
-	return filepath.Join(s.root, "projects", sanitizeSegment(project)+".state.json")
+// ProjectStatePath is the vulnerability state file for one project of one
+// client. Each gets its own: sharing one would make every finding of the next
+// project look new and every finding of the previous one resolved.
+//
+// The argument is the owner-scoped key carried in Analysis.Project
+// ("<owner>/<name>"), not a bare project name.
+//
+// Owner and project become two directory levels rather than one joined
+// segment, so ("acme", "x-y") and ("acme-x", "y") cannot collapse onto the
+// same file. The owner level carries a digest as well as the readable name —
+// see ownerSegment.
+//
+// A key with no owner in it predates scoping and keeps the old flat path, so
+// an existing data directory stays readable. Nothing writes one any more.
+func (s *Store) ProjectStatePath(key string) string {
+	owner, project := splitProjectKey(key)
+	project = sanitizeSegment(project)
+	if owner == "" {
+		return filepath.Join(s.root, "projects", project+".state.json")
+	}
+	return filepath.Join(s.root, "projects", ownerSegment(owner), project+".state.json")
 }
 
 // SaveAnalysis writes the record, replacing any previous version.
@@ -183,9 +227,13 @@ func (s *Store) LoadAnalysis(id string) (Analysis, bool, error) {
 	return a, true, nil
 }
 
-// ListAnalyses returns the most recent records, newest first, optionally
-// filtered by project.
-func (s *Store) ListAnalyses(project string, limit int) ([]Analysis, error) {
+// ListAnalyses returns the most recent records, newest first.
+//
+// owner restricts the listing to one client's records and is what keeps a
+// listing from being a directory of everybody's work; an empty owner means
+// every owner and is reachable only by an operator (see caller.admin).
+// project, when set, is the full owner-scoped key, not a bare name.
+func (s *Store) ListAnalyses(owner, project string, limit int) ([]Analysis, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -196,21 +244,10 @@ func (s *Store) ListAnalyses(project string, limit int) ([]Analysis, error) {
 
 	out := make([]Analysis, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
+		a, ok := s.readListed(entry)
+		if ok && matchesScope(a, owner, project) {
+			out = append(out, a)
 		}
-		raw, readErr := os.ReadFile(filepath.Join(s.root, "analyses", entry.Name()))
-		if readErr != nil {
-			continue // a half-written record must not break the listing
-		}
-		var a Analysis
-		if json.Unmarshal(raw, &a) != nil {
-			continue
-		}
-		if project != "" && a.Project != project {
-			continue
-		}
-		out = append(out, a)
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].QueuedAt.After(out[j].QueuedAt) })
@@ -220,10 +257,45 @@ func (s *Store) ListAnalyses(project string, limit int) ([]Analysis, error) {
 	return out, nil
 }
 
+// readListed decodes one directory entry. A half-written or unreadable record
+// is skipped rather than failing the listing.
+func (s *Store) readListed(entry os.DirEntry) (Analysis, bool) {
+	if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		return Analysis{}, false
+	}
+	raw, err := os.ReadFile(filepath.Join(s.root, "analyses", entry.Name()))
+	if err != nil {
+		return Analysis{}, false
+	}
+	var a Analysis
+	if json.Unmarshal(raw, &a) != nil {
+		return Analysis{}, false
+	}
+	return a, true
+}
+
+// matchesScope is the tenant filter the Postgres backend expresses as a WHERE
+// clause. Kept as one named predicate so the two implementations of the rule
+// can be read side by side.
+func matchesScope(a Analysis, owner, project string) bool {
+	if owner != "" && a.Owner != owner {
+		return false
+	}
+	return project == "" || a.Project == project
+}
+
 // WriteBlob stores a SARIF document at path.
+//
+// The parent directory is created because scans and project state are now
+// nested one level per owner, and the owner's directory does not exist until
+// that client first writes something.
 func (s *Store) WriteBlob(path string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("prepare %q: %w", filepath.Dir(path), err)
+	}
 	return os.WriteFile(path, data, 0o600)
 }
 

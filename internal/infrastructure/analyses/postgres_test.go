@@ -202,7 +202,7 @@ func TestPostgres_ListIsNewestFirstAndScopedToTheProject(t *testing.T) {
 		QueuedAt: base.Add(time.Hour),
 	}))
 
-	listed, err := store.ListAnalyses(ctx, project, 0)
+	listed, err := store.ListAnalyses(ctx, "", project, 0)
 	require.NoError(t, err)
 	require.Len(t, listed, 3, "a project's listing must not see another project's runs")
 
@@ -212,7 +212,7 @@ func TestPostgres_ListIsNewestFirstAndScopedToTheProject(t *testing.T) {
 	}
 	assert.Equal(t, wantNewestFirst, ids)
 
-	capped, err := store.ListAnalyses(ctx, project, 2)
+	capped, err := store.ListAnalyses(ctx, "", project, 2)
 	require.NoError(t, err)
 	require.Len(t, capped, 2)
 	assert.Equal(t, wantNewestFirst[:2], []string{capped[0].ID, capped[1].ID},
@@ -236,7 +236,7 @@ func TestPostgres_ListWithoutAProjectSpansThemAll(t *testing.T) {
 		Status: "completed", QueuedAt: now.Add(time.Second),
 	}))
 
-	listed, err := store.ListAnalyses(ctx, "", 50)
+	listed, err := store.ListAnalyses(ctx, "", "", 50)
 	require.NoError(t, err)
 
 	seen := map[string]bool{}
@@ -245,6 +245,46 @@ func TestPostgres_ListWithoutAProjectSpansThemAll(t *testing.T) {
 	}
 	assert.True(t, seen[first])
 	assert.True(t, seen[second])
+}
+
+// The owner filter is what keeps one client's listing out of another's. It is
+// asserted at this level and not only at the HTTP one because it is applied in
+// SQL: a handler that forgot to pass an owner must come back empty-handed, not
+// with the whole table.
+func TestPostgres_ListIsScopedToTheOwner(t *testing.T) {
+	store := newPostgres(t)
+	ctx := context.Background()
+	alice, bob := unique(t, "alice"), unique(t, "bob")
+	// The same project name under two owners, which is the collision a global
+	// project namespace used to merge into one history.
+	name := unique(t, "shared")
+	now := storedNow()
+
+	hers, his := unique(t, "an"), unique(t, "an")
+	require.NoError(t, store.SaveAnalysis(ctx, analyses.Report{
+		ID: hers, Owner: alice, Project: alice + "/" + name, Source: "git",
+		Status: "completed", QueuedAt: now,
+	}))
+	require.NoError(t, store.SaveAnalysis(ctx, analyses.Report{
+		ID: his, Owner: bob, Project: bob + "/" + name, Source: "git",
+		Status: "completed", QueuedAt: now.Add(time.Second),
+	}))
+
+	forAlice, err := store.ListAnalyses(ctx, alice, "", 50)
+	require.NoError(t, err)
+	require.Len(t, forAlice, 1)
+	assert.Equal(t, hers, forAlice[0].ID)
+	assert.Equal(t, alice, forAlice[0].Owner, "the owner has to survive the round trip")
+
+	forBob, err := store.ListAnalyses(ctx, bob, "", 50)
+	require.NoError(t, err)
+	require.Len(t, forBob, 1)
+	assert.Equal(t, his, forBob[0].ID)
+
+	// Naming the other owner's scoped key is not a way in either.
+	crossed, err := store.ListAnalyses(ctx, bob, alice+"/"+name, 50)
+	require.NoError(t, err)
+	assert.Empty(t, crossed)
 }
 
 // A client polls a running analysis for its SARIF before there is one. That is

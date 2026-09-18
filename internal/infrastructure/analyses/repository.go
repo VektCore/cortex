@@ -34,9 +34,11 @@ type Repository interface {
 	// LoadAnalysis returns one record. A missing id comes back as ok=false and
 	// no error, so a handler can answer 404 rather than 500.
 	LoadAnalysis(ctx context.Context, id string) (Report, bool, error)
-	// ListAnalyses returns records newest first, optionally filtered by
-	// project. A limit of zero or less means no limit.
-	ListAnalyses(ctx context.Context, project string, limit int) ([]Report, error)
+	// ListAnalyses returns records newest first, scoped to one owner and
+	// optionally to one project. An empty owner means every owner, which only
+	// an operator is ever given; project, when set, is the full owner-scoped
+	// key. A limit of zero or less means no limit.
+	ListAnalyses(ctx context.Context, owner, project string, limit int) ([]Report, error)
 	// WriteSARIF stores the canonical SARIF of an analysis that already exists.
 	WriteSARIF(ctx context.Context, id string, doc []byte) error
 	// ReadSARIF returns it. An analysis that has not produced one yet is
@@ -44,6 +46,10 @@ type Repository interface {
 	ReadSARIF(ctx context.Context, id string) ([]byte, bool, error)
 	// ReadProjectState returns the reconcile history a project's next run
 	// compares against. A project that has never been analysed has none.
+	//
+	// project is the owner-scoped key ("<owner>/<name>"): project names are
+	// caller-chosen, so keying this on a bare name would hand two clients one
+	// shared history.
 	ReadProjectState(ctx context.Context, project string) ([]byte, bool, error)
 	// WriteProjectState replaces it.
 	WriteProjectState(ctx context.Context, project string, doc []byte) error

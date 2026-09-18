@@ -20,7 +20,11 @@ import (
 type analysisRecords interface {
 	SaveAnalysis(ctx context.Context, a Analysis) error
 	LoadAnalysis(ctx context.Context, id string) (Analysis, bool, error)
-	ListAnalyses(ctx context.Context, project string, limit int) ([]Analysis, error)
+	// ListAnalyses returns records newest first. owner scopes the listing to
+	// one client and is the whole reason a listing is not a directory of
+	// every tenant's work; an empty owner means every owner, which only an
+	// operator ever gets. project, when set, is the full owner-scoped key.
+	ListAnalyses(ctx context.Context, owner, project string, limit int) ([]Analysis, error)
 	WriteSARIF(ctx context.Context, id string, doc []byte) error
 	ReadSARIF(ctx context.Context, id string) ([]byte, bool, error)
 	Close()
@@ -37,8 +41,10 @@ func (f fileRecords) LoadAnalysis(_ context.Context, id string) (Analysis, bool,
 	return f.store.LoadAnalysis(id)
 }
 
-func (f fileRecords) ListAnalyses(_ context.Context, project string, limit int) ([]Analysis, error) {
-	return f.store.ListAnalyses(project, limit)
+func (f fileRecords) ListAnalyses(
+	_ context.Context, owner, project string, limit int,
+) ([]Analysis, error) {
+	return f.store.ListAnalyses(owner, project, limit)
 }
 
 func (f fileRecords) WriteSARIF(_ context.Context, id string, doc []byte) error {
@@ -74,8 +80,10 @@ func (p pgRecords) LoadAnalysis(ctx context.Context, id string) (Analysis, bool,
 	return analysisFrom(report), true, nil
 }
 
-func (p pgRecords) ListAnalyses(ctx context.Context, project string, limit int) ([]Analysis, error) {
-	reports, err := p.repo.ListAnalyses(ctx, project, limit)
+func (p pgRecords) ListAnalyses(
+	ctx context.Context, owner, project string, limit int,
+) ([]Analysis, error) {
+	reports, err := p.repo.ListAnalyses(ctx, owner, project, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +106,7 @@ func (p pgRecords) Close() { p.repo.Close() }
 
 func reportFrom(a Analysis) analyses.Report {
 	return analyses.Report{
-		ID: a.ID, Project: a.Project, Source: a.Source,
+		ID: a.ID, Owner: a.Owner, Project: a.Project, Source: a.Source,
 		Repository: a.Repository, Ref: a.Ref, Commit: a.Commit,
 		Status: a.Status, Gate: a.Gate,
 		Findings: a.Findings, BySeverity: a.BySeverity,
@@ -111,7 +119,7 @@ func reportFrom(a Analysis) analyses.Report {
 
 func analysisFrom(r analyses.Report) Analysis {
 	return Analysis{
-		ID: r.ID, Project: r.Project, Source: r.Source,
+		ID: r.ID, Owner: r.Owner, Project: r.Project, Source: r.Source,
 		Repository: r.Repository, Ref: r.Ref, Commit: r.Commit,
 		Status: r.Status, Gate: r.Gate,
 		Findings: r.Findings, BySeverity: r.BySeverity,

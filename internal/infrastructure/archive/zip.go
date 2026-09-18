@@ -39,6 +39,12 @@ var (
 	// "../../etc/passwd" to "etc/passwd" would scan an attack as if it were
 	// the client's source.
 	ErrUnsafePath = errors.New("archive entry escapes the destination")
+	// ErrInvalidLimits means a caller passed a limit that is not a positive
+	// number. On a security ceiling a zero has two equally plausible readings,
+	// "no limit" and "the default", so it is refused instead of guessed:
+	// DefaultLimits() is how a caller with no opinion asks for the default,
+	// and anything else has to say what it means.
+	ErrInvalidLimits = errors.New("archive limits must be positive")
 	// ErrCorruptArchive means an entry did not match its own header: a bad
 	// checksum, a truncated stream, or more data than the header declared.
 	// The last of those is what a zip bomb looks like once the declared sizes
@@ -47,7 +53,9 @@ var (
 	ErrCorruptArchive = errors.New("archive entry does not match its header")
 )
 
-// Limits bound what one archive may expand into. Zero fields take the default.
+// Limits bound what one archive may expand into. Both fields are required and
+// must be positive: see ErrInvalidLimits for why the zero value is refused
+// rather than filled in. Start from DefaultLimits() and override what differs.
 type Limits struct {
 	// MaxEntries is the number of files and directories the archive may hold.
 	MaxEntries int
@@ -61,15 +69,23 @@ func DefaultLimits() Limits {
 	return Limits{MaxEntries: 200_000, MaxBytes: 2 << 30}
 }
 
-func (l Limits) withDefaults() Limits {
-	def := DefaultLimits()
+// Validate reports whether these limits are usable. It is exported so a caller
+// that reads them from configuration can refuse a bad value at startup, where
+// an operator is there to read the message, rather than on the first upload.
+//
+// It deliberately does not repair anything. Quietly turning a zero into the
+// default widens a ceiling an operator thought they had tightened, and a
+// widened ceiling is invisible until the archive that exploits it arrives.
+func (l Limits) Validate() error {
 	if l.MaxEntries <= 0 {
-		l.MaxEntries = def.MaxEntries
+		return fmt.Errorf("%w: MaxEntries is %d (DefaultLimits() asks for the default)",
+			ErrInvalidLimits, l.MaxEntries)
 	}
 	if l.MaxBytes <= 0 {
-		l.MaxBytes = def.MaxBytes
+		return fmt.Errorf("%w: MaxBytes is %d (DefaultLimits() asks for the default)",
+			ErrInvalidLimits, l.MaxBytes)
 	}
-	return l
+	return nil
 }
 
 // Result reports what came out, so the analysis can say what it actually
@@ -95,13 +111,31 @@ type Result struct {
 // call, including after an error.
 func ExtractZip(src, parent string, limits Limits) (Result, func(), error) {
 	noop := func() {}
-	limits = limits.withDefaults()
+	if err := limits.Validate(); err != nil {
+		return Result{}, noop, err
+	}
 
-	reader, err := zip.OpenReader(src)
+	// The file is opened by hand rather than through zip.OpenReader so that
+	// the entry cap can be enforced against the central directory before
+	// archive/zip allocates a *zip.File per record. See centraldir.go.
+	f, err := os.Open(src) // #nosec G304 -- src is the upload this call was asked to expand
 	if err != nil {
 		return Result{}, noop, fmt.Errorf("open archive: %w", err)
 	}
-	defer func() { _ = reader.Close() }()
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return Result{}, noop, fmt.Errorf("open archive: %w", err)
+	}
+	if err := boundEntryCount(f, info.Size(), limits.MaxEntries); err != nil {
+		return Result{}, noop, err
+	}
+
+	reader, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		return Result{}, noop, fmt.Errorf("open archive: %w", err)
+	}
 
 	if err := precheck(reader.File, limits); err != nil {
 		return Result{}, noop, err
@@ -127,8 +161,11 @@ func ExtractZip(src, parent string, limits Limits) (Result, func(), error) {
 	return res, cleanup, nil
 }
 
-// precheck rejects an archive on what the central directory already says, so a
-// bomb is refused before a single byte is written.
+// precheck rejects an archive on what the parsed central directory says, so a
+// bomb is refused before a single byte is written. The entry count has already
+// been bounded against the raw directory in boundEntryCount; re-checking it
+// here costs nothing and keeps the guarantee local to the parsed entries this
+// function is about to hand to the extractor.
 func precheck(files []*zip.File, limits Limits) error {
 	if len(files) > limits.MaxEntries {
 		return fmt.Errorf("%w: %d entries, limit is %d",
@@ -142,7 +179,7 @@ func precheck(files []*zip.File, limits Limits) error {
 	// is tested against the remaining budget before being added to it. Summing
 	// first would let a handful of entries near the top of the range wrap the
 	// total back down to something that passes.
-	budget := uint64(limits.MaxBytes) // #nosec G115 -- withDefaults leaves MaxBytes > 0
+	budget := uint64(limits.MaxBytes) // #nosec G115 -- Validate leaves MaxBytes > 0
 	var declared uint64
 	for _, f := range files {
 		if f.UncompressedSize64 > budget || declared > budget-f.UncompressedSize64 {
