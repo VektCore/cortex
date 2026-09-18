@@ -207,37 +207,118 @@ runs:
 
         if [ "$CORTEX_GATE_ON" = "new" ]; then
           [ "$new" -eq 0 ] && passed=true || passed=false
-          criterion="no new findings"
+          criterion="no finding this project had not seen before"
+          detail="$new new"
         else
           [ "$gate" = "passed" ] && passed=true || passed=false
           criterion="the server's Quality Gate"
+          detail="$findings finding(s)"
         fi
         echo "passed=$passed" >> "$GITHUB_OUTPUT"
+
+        if [ "$passed" = true ]; then
+          verdict="**PASSED**"
+        else
+          # Naming the number that failed it. "FAILED (no new findings)" reads
+          # as a contradiction: the parenthetical is the criterion, not the
+          # result, and nobody reads it that way.
+          verdict="**FAILED** — $detail, and the criterion is $criterion"
+        fi
 
         {
           echo "## Cortex — security analysis"
           echo
           echo "| | |"
           echo "|---|---|"
-          echo "| Verdict | **$( [ "$passed" = true ] && echo PASSED || echo FAILED )** ($criterion) |"
+          echo "| Verdict | $verdict |"
           echo "| Quality Gate | $gate |"
-          echo "| Findings | $findings |"
-          echo "| New in this project | $new |"
-          echo "| Scanners that ran | $ran |"
-          [ "$errs" -gt 0 ] && echo "| Scanners that failed | $errs |"
+          echo "| Findings | $findings  ($new new to this project) |"
           echo "| By severity | $(jq -rc '.by_severity // {}' < "$body") |"
+          echo "| Scanners | $ran ran, $errs failed |"
           echo "| Analysis | \`$id\` |"
           echo
           # A run where most tools failed must not read as a clean repository.
           if [ "$errs" -gt 0 ]; then
-            echo "> $errs scanner(s) did not complete. The counts above are"
-            echo "> therefore a floor, not a total."
+            echo "> $errs scanner(s) did not complete. Every count here is a"
+            echo "> floor, not a total."
             echo
             jq -r '.scanner_errors // {} | to_entries[] | "- **\(.key)**: \(.value)"' < "$body"
+            echo
           fi
         } >> "$GITHUB_STEP_SUMMARY"
 
+        # The detail. A count alone tells nobody what to do, and with
+        # upload-sarif off — which a private repository without Advanced
+        # Security has no choice about — there is nowhere else to go and look.
+        if [ -s "$sarif" ]; then
+          jq -r '
+            def sev:
+              (.properties["security-severity"] // "0" | tonumber) as $s
+              | if   $s >= 9 then "critical"
+                elif $s >= 7 then "high"
+                elif $s >= 4 then "medium"
+                elif $s >  0 then "low"
+                else "info" end;
+            def rank:
+              {critical:0, high:1, medium:2, low:3, info:4}[sev];
+            def uri:
+              .locations[0].physicalLocation.artifactLocation.uri // "(no file)";
+            # The top-level path component, which is what makes a vendored
+            # directory or a duplicated lockfile visible as one row instead of
+            # a hundred. Split the path, never the "path:line" string.
+            def area:
+              uri | split("/")[0];
+            def loc:
+              uri + ":"
+              + ((.locations[0].physicalLocation.region.startLine // 0) | tostring);
+            [.runs[].results[]] as $all
+            | ($all | length) as $total
+
+            # Where they are, before what they are: a repository with a
+            # vendored directory or two lockfiles reports the same finding
+            # many times, and the shape of that is visible here and nowhere
+            # else.
+            | "### Where they are", "",
+              "| Area | Findings |", "|---|---:|",
+              ( $all
+                | group_by(area)
+                | map({area: (.[0] | area), n: length})
+                | sort_by(-.n) | .[:12][]
+                | "| `\(.area)` | \(.n) |" ),
+              "",
+              "<details><summary><b>All \($total) findings</b> — most severe first</summary>",
+              "",
+              "| Severity | Rule | Location | Scanner |",
+              "|---|---|---|---|",
+              ( $all
+                | sort_by(rank, .ruleId)
+                | .[:400][]
+                | "| \(sev) | `\(.ruleId // "?")` | `\(loc)` | \(.properties["cortex/scanner"] // "?") |" ),
+              "",
+              ( if $total > 400
+                then "_Showing the 400 most severe of \($total). The full SARIF is attached to this run as an artifact._"
+                else "" end ),
+              "</details>"
+          ' < "$sarif" >> "$GITHUB_STEP_SUMMARY" || \
+            echo "_Could not render the findings table; the SARIF artifact has them._" \
+              >> "$GITHUB_STEP_SUMMARY"
+        fi
+
         echo "gate_failed=$( [ "$passed" = true ] && echo 0 || echo 1 )" >> "$GITHUB_ENV"
+
+    # Always, whatever upload-sarif says. A private repository without
+    # Advanced Security cannot publish to Code Scanning, and then the job
+    # summary is the only trace of what was found — truncated, and gone when
+    # the run is cleaned up. The document itself has every finding, with its
+    # fingerprint and the code around it.
+    - name: Attach the SARIF to the run
+      if: ${{ steps.gate.outputs.sarif != '' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: cortex-sarif-${{ steps.gate.outputs.analysis-id }}
+        path: ${{ steps.gate.outputs.sarif }}
+        retention-days: 30
 
     - name: Upload SARIF to Code Scanning
       if: ${{ inputs.upload-sarif == 'true' && steps.gate.outputs.sarif != '' }}
