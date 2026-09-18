@@ -229,6 +229,100 @@ Credentials for private repositories live on the server (`CORTEX_GIT_TOKEN`,
 `GITHUB_TOKEN`, `GITLAB_TOKEN`, or an SSH agent), so clients never send tokens
 over the API.
 
+### Giving a client access: issuing a key
+
+A client is given access by issuing a key for it, against the same config the
+server runs with:
+
+```bash
+cortex keys issue -c server.yaml --client acme --ttl 90d
+```
+
+```
+key issued for acme
+
+  id         3f9a2c1d
+  expires    2026-12-15T09:41:07Z  (in 90 days)
+
+  ctx_1f4c8a...c7a2
+
+This is the only time the secret is shown. It is stored as a
+hash, so it cannot be recovered — only revoked and reissued.
+```
+
+Only the SHA-256 of the secret is kept, so that line is the one chance to copy
+it into the client's CI: a lost key is replaced, never recovered, and a leaked
+key store hands over nobody's credential. The `ctx_` prefix is there so a secret
+scanner has something to match when a key ends up pasted where it should not be.
+`--ttl` takes `90d`, `12h` or `30m`; without it the key gets
+`server.api_key_ttl` (default `90d`). Issue against the wrong config and the
+key lands in a store the server does not read.
+
+**Keys expire by design.** This credential lets whoever holds it upload archives
+for the server to unpack and scan. Something that reaches that far should stop
+working on its own rather than live in a config file until somebody remembers to
+delete it — which is how a key issued for a two-week pilot is still valid two
+years later.
+
+```bash
+cortex keys list
+```
+
+```
+ID        CLIENT  STATUS   ENDS        SECRET
+3f9a2c1d  acme    active   2026-12-15  …c7a2
+8b20de41  globex  expired  2026-07-02  …19f4
+```
+
+```bash
+cortex keys revoke 3f9a2c1d      # stops authenticating at once, no restart
+```
+
+The revoked key keeps its row: an audit has to see that it existed and when
+access was withdrawn. The last four characters are shown so two of a client's
+keys can be told apart during a rotation without printing either.
+
+Every authenticated response carries the expiry of the key that was used:
+
+```
+X-Cortex-Key-Expires: 2026-12-15T09:41:07Z
+```
+
+A client's pipeline can read that and rotate on its own schedule instead of
+discovering the date as a red build; the server also logs a warning on every use
+in the last 14 days. A refused request is always a bare `401` — whether the
+key was expired, revoked or never real goes to the server's log only, because
+saying which confirms to a stranger that the key was once real.
+
+The static `server.api_keys` in the config file still work, and are how a fresh
+deployment bootstraps before it has anything to issue keys with. They never
+expire, which is exactly why they should not be how a client is given long-term
+access.
+
+### Where the keys are kept
+
+The key store follows `server.database`:
+
+```yaml
+server:
+  # PostgreSQL: several instances behind one key table, auditable with a query.
+  database: postgres://cortex:${PGPASSWORD}@db:5432/cortex?sslmode=require
+  api_key_ttl: 90d
+```
+
+Left empty — the default — keys go to `api-keys.json` under
+`server.data_dir`, written `0600` inside a `0700` directory. That is not a
+degraded mode: a single binary plus a volume has to be the whole deployment,
+because that is what lets the same binary run as a CLI step in somebody else's
+pipeline with no database in sight. Both stores hold hashes only, and `keys
+issue`, `list` and `revoke` resolve the store exactly as the server does.
+
+Cortex applies its own `cortex_api_keys` schema on connect, and the statements
+are safe to re-apply, so there is no migration step to run before a first start.
+It deliberately does not join the `VektCore_Migrations` orchestrator: that runs
+Alembic out of each service's own Docker image, and a Go binary carries neither
+Alembic nor SQLAlchemy.
+
 ### Connecting a repository: nothing installed in it
 
 A repository is connected by pointing its push webhook at the server. No
@@ -444,6 +538,8 @@ cortex baseline    manage the baseline SARIF for differential gating
 cortex pipeline    run the full chain in one shot
 cortex status      tracked vulnerabilities: open, triaged, resolved, regressions
 cortex triage      record a decision about a vulnerability
+cortex serve       run as a service clients submit repositories or archives to
+cortex keys        issue, list and revoke the credentials clients authenticate with
 cortex version     show version information
 ```
 

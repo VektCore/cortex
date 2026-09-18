@@ -62,6 +62,58 @@ type ServerConfig struct {
 	// Upload bounds the archive-upload endpoint, the deployment where the
 	// client's pipeline sends the source instead of granting clone access.
 	Upload UploadConfig `mapstructure:"upload"`
+	// Database is the PostgreSQL DSN for server state: issued API keys, and
+	// the analyses and SARIF behind them. Empty keeps everything in files
+	// under DataDir, which is what lets the same binary run as a CLI step in
+	// somebody else's pipeline with no database in sight.
+	//
+	// Three things stay on disk whatever this says. An uploaded archive and
+	// the directory it is expanded into are transient files, not records. And
+	// the per-project reconcile state — the memory that decides which findings
+	// are new — still lives under DataDir: its serialisation belongs to
+	// infrastructure/state, and a second codec for the same document is how
+	// "new findings" starts quietly disagreeing with itself. Moving it is a
+	// deliberate follow-up, not an oversight.
+	Database string `mapstructure:"database"`
+	// APIKeyTTL is the lifetime `keys issue` gives a credential when the
+	// operator does not say. Keys expire by design: one that lets a stranger
+	// upload archives for this server to unpack should stop working on its
+	// own rather than live until somebody remembers to delete it.
+	APIKeyTTL string `mapstructure:"api_key_ttl"`
+	// EngineVersion is the binary's build version, stamped onto what is
+	// published so a finding can be traced back to the engine that produced
+	// it. It comes from ldflags at startup, never from the config file.
+	EngineVersion string `mapstructure:"-"`
+	// Platform pushes finished analyses into VektCore_Platform, where the
+	// findings get a lifecycle, triage and a UI. Cortex keeps the record of
+	// what the scan found; the platform keeps what the team decided about it.
+	Platform PlatformConfig `mapstructure:"platform"`
+}
+
+// PlatformConfig points the server at a VektCore_Platform instance.
+type PlatformConfig struct {
+	// BaseURL is the gateway, e.g. https://app.vektcore.com. Empty disables
+	// the push entirely.
+	BaseURL string `mapstructure:"base_url"`
+	// Token is the JWT the platform authenticates with. Its `org` claim
+	// decides the tenant the scan is filed under — it cannot be set per
+	// request — and it must carry the code_security module or the gateway
+	// refuses with 403.
+	Token string `mapstructure:"token"`
+	// Projects maps a cortex project name onto the platform's project UUID.
+	//
+	// The two systems name projects differently and neither can derive the
+	// other: cortex takes a free-text name from whoever submits the analysis,
+	// the platform addresses projects by UUID and 404s on anything else. An
+	// unmapped project is skipped rather than guessed at.
+	Projects map[string]string `mapstructure:"projects"`
+}
+
+// PlatformProjectID returns the platform UUID for a cortex project name, and
+// whether one is configured.
+func (p PlatformConfig) PlatformProjectID(project string) (string, bool) {
+	id, ok := p.Projects[project]
+	return id, ok && id != ""
 }
 
 // UploadConfig bounds POST /api/v1/analyses/upload.
@@ -257,6 +309,9 @@ func applyDefaults(v *viper.Viper) {
 	v.SetDefault("server.upload.max_archive_bytes", 256<<20)
 	v.SetDefault("server.upload.max_extracted_bytes", 2<<30)
 	v.SetDefault("server.upload.max_entries", 200_000)
+	v.SetDefault("server.database", "")
+	v.SetDefault("server.api_key_ttl", "90d")
+	v.SetDefault("server.platform.base_url", "")
 	v.SetDefault("reachability.enabled", true)
 	v.SetDefault("reachability.demote", true)
 	// Vendored and generated code is other people's problem: scanning it

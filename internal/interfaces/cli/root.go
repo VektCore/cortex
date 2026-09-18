@@ -81,6 +81,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newBaselineCmd(),
 		newPipelineCmd(),
 		newServeCmd(),
+		newKeysCmd(),
 		newStatusCmd(),
 		newTriageCmd(),
 		newVersionCmd(),
@@ -107,7 +108,8 @@ Workflow:
   cortex pipeline    → run the full chain in one shot
 
 Server mode (clients connect with an API key instead of installing scanners):
-  cortex serve       → HTTP API: submit a repository, poll the analysis
+  cortex serve       → HTTP API: submit a repository or upload an archive
+  cortex keys        → issue, list and revoke client credentials
 
 Vulnerability tracking (state kept between scans):
   cortex status      → open / triaged / resolved, regressions, oldest debt

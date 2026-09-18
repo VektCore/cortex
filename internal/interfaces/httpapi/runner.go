@@ -20,6 +20,7 @@ import (
 	"github.com/vektcore/cortex/internal/infrastructure/config"
 	gitinfra "github.com/vektcore/cortex/internal/infrastructure/git"
 	ghpublish "github.com/vektcore/cortex/internal/infrastructure/publishers/github_code_scanning"
+	platformpublish "github.com/vektcore/cortex/internal/infrastructure/publishers/vektcore_platform"
 )
 
 const (
@@ -37,10 +38,15 @@ const (
 // low and the failure modes worth handling are "the clone failed" and "a
 // scanner is missing" — both of which the engine already reports.
 type Runner struct {
-	cfg    *config.Config
-	store  *Store
-	logger ports.Logger
-	queue  chan string
+	cfg *config.Config
+	// store owns what stays on disk whatever the backend: the uploaded
+	// archive and the directory it is expanded into.
+	store *Store
+	// records is where the analysis and its SARIF are kept — a file or a
+	// database, decided by server.database.
+	records analysisRecords
+	logger  ports.Logger
+	queue   chan string
 	// ctx is cancelled on Stop, which aborts the clone and the scanners of an
 	// in-flight analysis rather than leaving them orphaned.
 	ctx    context.Context
@@ -49,15 +55,19 @@ type Runner struct {
 }
 
 // NewRunner starts `workers` goroutines draining the queue.
-func NewRunner(cfg *config.Config, store *Store, logger ports.Logger, workers int) *Runner {
+func NewRunner(
+	cfg *config.Config, store *Store, records analysisRecords,
+	logger ports.Logger, workers int,
+) *Runner {
 	if workers < 1 {
 		workers = 1
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Runner{
-		cfg:    cfg,
-		store:  store,
-		logger: logger,
+		cfg:     cfg,
+		store:   store,
+		records: records,
+		logger:  logger,
 		// Bounded: a full queue rejects new work with 503 instead of letting
 		// the box accept thousands of clones it will never get to.
 		queue:  make(chan string, 256),
@@ -122,7 +132,7 @@ func (r *Runner) work() {
 // run executes one analysis, recording every outcome — including failure — on
 // the record the client polls.
 func (r *Runner) run(id string) {
-	analysis, found, err := r.store.LoadAnalysis(id)
+	analysis, found, err := r.records.LoadAnalysis(context.Background(), id)
 	if err != nil || !found {
 		r.logger.Error("analysis vanished from the store", ports.F("id", id))
 		return
@@ -210,7 +220,7 @@ func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
 	analysis.Findings = len(agg.Findings)
 	analysis.BySeverity = countBySeverity(agg.Findings)
 
-	doc, writeErr := r.writeSARIF(codec, analysis, revision, agg.Findings)
+	doc, writeErr := r.writeSARIF(ctx, codec, analysis, revision, agg.Findings)
 	if writeErr != nil {
 		return writeErr
 	}
@@ -230,11 +240,62 @@ func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
 		return err
 	}
 
-	// Publishing back to GitHub is what makes the whole thing visible without
-	// anything installed in the repository. It is the last step and never fails
-	// the analysis: the findings are already stored and served here.
+	// Publishing is the last step and never fails the analysis: the findings
+	// are already stored and served here. GitHub makes them visible in the
+	// repository; the platform gives them a lifecycle and a triage queue.
 	r.publishToGitHub(ctx, *analysis, doc)
+	r.publishToPlatform(ctx, *analysis, doc)
 	return nil
+}
+
+// publishToPlatform files the analysis in VektCore_Platform, where a finding
+// gets a status, an owner and a triage decision. Cortex remains the record of
+// what the scan found; the platform becomes the record of what was decided.
+//
+// Every failure here is logged and swallowed, for the same reason as the GitHub
+// publisher: a platform that is down, or a token that has expired, must not
+// turn a completed scan into a failed one.
+func (r *Runner) publishToPlatform(ctx context.Context, analysis Analysis, sarif []byte) {
+	cfg := r.cfg.Server.Platform
+	client := platformpublish.New(cfg.BaseURL, cfg.Token)
+	if !client.Configured() {
+		return
+	}
+
+	// The platform addresses projects by UUID and cortex by name, and neither
+	// can derive the other. An unmapped project is skipped and said out loud,
+	// because silently not publishing looks exactly like publishing.
+	projectID, ok := cfg.PlatformProjectID(analysis.Project)
+	if !ok {
+		r.logger.Warn("not publishing to the platform: no project mapping",
+			ports.F("id", analysis.ID),
+			ports.F("project", analysis.Project),
+			ports.F("fix", "add server.platform.projects."+analysis.Project))
+		return
+	}
+
+	result, err := client.PublishScan(ctx, platformpublish.ScanRequest{
+		ProjectID:      projectID,
+		Commit:         analysis.Commit,
+		Ref:            analysis.Ref,
+		AnalysisID:     analysis.ID,
+		ScannerVersion: r.cfg.Server.EngineVersion,
+		SARIF:          sarif,
+	})
+	if err != nil {
+		r.logger.Warn("could not publish to the platform",
+			ports.F("id", analysis.ID), ports.F("error", err.Error()))
+		return
+	}
+
+	// The platform's counts are post-deduplication and post-triage-replay, so
+	// they legitimately differ from this analysis's own. Logged as the
+	// platform's view, never reconciled against ours.
+	r.logger.Info("analysis published to the platform",
+		ports.F("id", analysis.ID),
+		ports.F("platform_scan", result.ScanID),
+		ports.F("platform_total", fmt.Sprint(result.TotalFindings)),
+		ports.F("platform_new", fmt.Sprint(result.NewFindings)))
 }
 
 // sourceTree produces the directory to analyse, and a cleanup that removes it.
@@ -341,6 +402,7 @@ func (r *Runner) reconcile(
 }
 
 func (r *Runner) writeSARIF(
+	ctx context.Context,
 	codec ports.SarifCodec,
 	analysis *Analysis,
 	revision scan.Revision,
@@ -353,7 +415,7 @@ func (r *Runner) writeSARIF(
 	if err != nil {
 		return nil, fmt.Errorf("write SARIF: %w", err)
 	}
-	if writeErr := r.store.WriteBlob(r.store.SarifPath(analysis.ID), doc); writeErr != nil {
+	if writeErr := r.records.WriteSARIF(ctx, analysis.ID, doc); writeErr != nil {
 		return nil, fmt.Errorf("store SARIF: %w", writeErr)
 	}
 	return doc, nil
@@ -492,8 +554,11 @@ func (r *Runner) escalations() map[finding.CWE]shared.Severity {
 	return escalations
 }
 
+// persist records the analysis. It uses a background context deliberately: the
+// save that records a failed or interrupted run must still happen when the
+// context that carried the scan is exactly what was cancelled.
 func (r *Runner) persist(a Analysis) {
-	if err := r.store.SaveAnalysis(a); err != nil {
+	if err := r.records.SaveAnalysis(context.Background(), a); err != nil {
 		r.logger.Error("could not persist analysis",
 			ports.F("id", a.ID), ports.F("error", err.Error()))
 	}

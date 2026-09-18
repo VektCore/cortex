@@ -119,7 +119,7 @@ func (s *Server) queuePush(w http.ResponseWriter, r *http.Request, body []byte) 
 		QueuedAt:    time.Now().UTC(),
 	}
 
-	if err := s.store.SaveAnalysis(analysis); err != nil {
+	if err := s.records.SaveAnalysis(r.Context(), analysis); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not queue the analysis")
 		return
 	}

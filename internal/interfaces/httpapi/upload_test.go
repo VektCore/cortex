@@ -236,7 +236,7 @@ func TestUpload_RunsAndThenDeletesTheArchive(t *testing.T) {
 	var queued httpapi.Analysis
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &queued))
 
-	final := waitForTerminal(t, h, queued.ID)
+	final := waitForTerminal(t, h, queued.ID, testKey)
 
 	assert.Equal(t, httpapi.StatusCompleted, final.Status, final.Error)
 	assert.Equal(t, "deadbeefdeadbeef", final.Commit,
@@ -244,12 +244,12 @@ func TestUpload_RunsAndThenDeletesTheArchive(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(dataDir, "archives", queued.ID+".zip"))
 }
 
-func waitForTerminal(t *testing.T, h http.Handler, id string) httpapi.Analysis {
+func waitForTerminal(t *testing.T, h http.Handler, id, key string) httpapi.Analysis {
 	t.Helper()
 
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		rec := do(t, h, http.MethodGet, "/api/v1/analyses/"+id, "", testKey)
+		rec := do(t, h, http.MethodGet, "/api/v1/analyses/"+id, "", key)
 		require.Equal(t, http.StatusOK, rec.Code)
 
 		var a httpapi.Analysis

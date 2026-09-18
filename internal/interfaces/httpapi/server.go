@@ -22,6 +22,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,44 +34,63 @@ import (
 
 	"github.com/vektcore/cortex/internal/application/ports"
 	"github.com/vektcore/cortex/internal/bootstrap"
+	"github.com/vektcore/cortex/internal/infrastructure/apikeys"
 	"github.com/vektcore/cortex/internal/infrastructure/config"
 	gitinfra "github.com/vektcore/cortex/internal/infrastructure/git"
 )
 
 // Server is the HTTP adapter.
 type Server struct {
-	cfg    *config.Config
-	store  *Store
-	runner *Runner
-	auth   *authenticator
-	logger ports.Logger
-	mux    *http.ServeMux
+	cfg     *config.Config
+	store   *Store
+	records analysisRecords
+	issued  apikeys.Repository
+	runner  *Runner
+	auth    *authenticator
+	logger  ports.Logger
+	mux     *http.ServeMux
 }
 
-// ErrNoAPIKeys is returned when the server would accept unauthenticated calls.
+// ErrNoAPIKeys is returned when nobody could authenticate against this server.
 var ErrNoAPIKeys = errors.New(
-	"server.api_keys is empty: refusing to start an unauthenticated service " +
-		"that can clone repositories")
+	"no usable API key: refusing to start a service that would answer 401 to " +
+		"everything. Issue one with `cortex keys issue --client <name> --ttl 90d`, " +
+		"or set server.api_keys")
 
 // New builds the server. It fails rather than starting without credentials.
 func New(cfg *config.Config, logger ports.Logger) (*Server, error) {
-	auth := newAuthenticator(cfg.Server.APIKeys)
-	if !auth.configured() {
-		return nil, ErrNoAPIKeys
-	}
-
 	store, err := NewStore(cfg.Server.DataDir)
 	if err != nil {
 		return nil, err
 	}
 
+	records, err := openRecords(context.Background(), cfg.Server.Database, store)
+	if err != nil {
+		return nil, err
+	}
+
+	issued, err := apikeys.Open(context.Background(), cfg.Server.Database, cfg.Server.DataDir)
+	if err != nil {
+		records.Close()
+		return nil, err
+	}
+
+	auth := newAuthenticator(cfg.Server.APIKeys, issued)
+	if !auth.configured(context.Background()) {
+		issued.Close()
+		records.Close()
+		return nil, ErrNoAPIKeys
+	}
+
 	s := &Server{
-		cfg:    cfg,
-		store:  store,
-		runner: NewRunner(cfg, store, logger, cfg.Server.Workers),
-		auth:   auth,
-		logger: logger,
-		mux:    http.NewServeMux(),
+		cfg:     cfg,
+		store:   store,
+		records: records,
+		issued:  issued,
+		runner:  NewRunner(cfg, store, records, logger, cfg.Server.Workers),
+		auth:    auth,
+		logger:  logger,
+		mux:     http.NewServeMux(),
 	}
 	s.routes()
 	return s, nil
@@ -79,11 +99,20 @@ func New(cfg *config.Config, logger ports.Logger) (*Server, error) {
 // Handler returns the authenticated handler tree.
 func (s *Server) Handler() http.Handler { return s.middleware(s.mux) }
 
-// Close stops accepting new analyses.
-func (s *Server) Close() { s.runner.Stop() }
+// Close stops accepting new analyses and releases the key store.
+func (s *Server) Close() {
+	s.runner.Stop()
+	if s.issued != nil {
+		s.issued.Close()
+	}
+	if s.records != nil {
+		s.records.Close()
+	}
+}
 
-// Clients returns how many credentials are configured, for the startup log.
-func (s *Server) Clients() int { return len(s.auth.keys) }
+// Clients returns how many credentials would work right now, for the startup
+// log. Expired ones are not counted: reporting them would overstate access.
+func (s *Server) Clients() int { return s.auth.usable(context.Background()) }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
@@ -158,7 +187,7 @@ func (s *Server) createAnalysis(w http.ResponseWriter, r *http.Request) {
 		QueuedAt:    time.Now().UTC(),
 	}
 
-	if err := s.store.SaveAnalysis(analysis); err != nil {
+	if err := s.records.SaveAnalysis(r.Context(), analysis); err != nil {
 		s.logger.Error("could not queue analysis", logField("error", err.Error()))
 		writeError(w, http.StatusInternalServerError, "could not queue the analysis")
 		return
@@ -166,7 +195,7 @@ func (s *Server) createAnalysis(w http.ResponseWriter, r *http.Request) {
 	if !s.runner.Enqueue(analysis.ID) {
 		analysis.Status = StatusFailed
 		analysis.Error = "the queue is full"
-		_ = s.store.SaveAnalysis(analysis)
+		_ = s.records.SaveAnalysis(r.Context(), analysis)
 		writeError(w, http.StatusServiceUnavailable,
 			"the queue is full; retry shortly")
 		return
@@ -189,7 +218,7 @@ func (s *Server) listAnalyses(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	items, err := s.store.ListAnalyses(r.URL.Query().Get("project"), limit)
+	items, err := s.records.ListAnalyses(r.Context(), r.URL.Query().Get("project"), limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -218,7 +247,7 @@ func (s *Server) handleAnalysisByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	analysis, found, err := s.store.LoadAnalysis(id)
+	analysis, found, err := s.records.LoadAnalysis(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -233,7 +262,7 @@ func (s *Server) handleAnalysisByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	doc, ok, readErr := s.store.ReadBlob(s.store.SarifPath(id))
+	doc, ok, readErr := s.records.ReadSARIF(r.Context(), id)
 	if readErr != nil {
 		writeError(w, http.StatusInternalServerError, readErr.Error())
 		return

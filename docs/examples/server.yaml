@@ -13,8 +13,26 @@ server:
   # concurrency is low. Two is a sensible start for a 4-core box.
   workers: 2
 
-  # One entry per client. The name appears in the logs and on each analysis, so
-  # work is attributable without ever printing a key.
+  # Where issued API keys live. Empty — the default below — keeps them in
+  # api-keys.json next to the analyses under data_dir, which is what lets a
+  # single binary plus a volume be the whole deployment. Point it at PostgreSQL
+  # when several instances share one key table, or when credentials have to be
+  # auditable with a query instead of by reading JSON off a disk. Cortex applies
+  # its own schema on connect, so there is no migration to run first.
+  # database: postgres://cortex:${PGPASSWORD}@db:5432/cortex?sslmode=require
+
+  # Lifetime `cortex keys issue` gives a key when --ttl is not passed. Keys
+  # expire by design: a credential that lets its holder upload archives for this
+  # server to unpack should stop working on its own, rather than live in a file
+  # until somebody remembers to delete it.
+  api_key_ttl: 90d
+
+  # Static keys, for bootstrapping a fresh deployment before there is anything
+  # to issue keys with. One entry per client: the name appears in the logs and
+  # on each analysis, so work is attributable without ever printing a key.
+  #
+  # These never expire, which is why they are not how a client is given
+  # long-term access: `cortex keys issue --client acme --ttl 90d` is.
   #
   # Generate one with: openssl rand -hex 32
   # Keep them in the environment, never in this file.

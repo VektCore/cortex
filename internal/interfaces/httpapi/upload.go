@@ -77,7 +77,7 @@ func (s *Server) handleUploadAnalysis(w http.ResponseWriter, r *http.Request) {
 		QueuedAt:    time.Now().UTC(),
 	}
 
-	if err := s.store.SaveAnalysis(analysis); err != nil {
+	if err := s.records.SaveAnalysis(r.Context(), analysis); err != nil {
 		_ = s.store.RemoveArchive(id)
 		s.logger.Error("could not queue upload", logField("error", err.Error()))
 		writeError(w, http.StatusInternalServerError, "could not queue the analysis")
@@ -87,7 +87,7 @@ func (s *Server) handleUploadAnalysis(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.RemoveArchive(id)
 		analysis.Status = StatusFailed
 		analysis.Error = "the queue is full"
-		_ = s.store.SaveAnalysis(analysis)
+		_ = s.records.SaveAnalysis(r.Context(), analysis)
 		writeError(w, http.StatusServiceUnavailable, "the queue is full; retry shortly")
 		return
 	}

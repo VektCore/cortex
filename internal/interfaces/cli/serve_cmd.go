@@ -55,6 +55,9 @@ func runServe(cmd *cobra.Command, _ []string) error {
 	}
 
 	applyServeOverrides(cmd, env)
+	// Build metadata, not configuration: it travels with published results so
+	// a finding can be traced back to the engine build that found it.
+	env.cfg.Server.EngineVersion = version
 
 	server, err := httpapi.New(env.cfg, env.logger)
 	if err != nil {
