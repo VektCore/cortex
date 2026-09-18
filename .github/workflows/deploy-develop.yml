@@ -1,0 +1,171 @@
+# develop → the development host (46.225.19.229, Hetzner).
+#
+# Production is a different machine (169.58.193.83, Contabo) and is NOT
+# deployed from here. See VektCore_Migrations/config/targets.tsv for the
+# mapping; confusing the two has already happened once.
+#
+# The image is built here rather than on the server: the development box is
+# 2 vCPU / 3.7 GiB and also runs the platform, and this image carries seven
+# scanners. Building it there competes with what is already running.
+
+name: Deploy to development
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+# One deploy at a time, newest wins. Without this two quick merges each start a
+# deploy and the LAST to finish wins — which can be the OLDER commit.
+concurrency:
+  group: deploy-develop
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Gating on the real CI rather than repeating a subset of it: a deploy that
+  # ships what the tests would have rejected is worse than a slow one.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      # The fallbacks elsewhere in this estate are silent: an undefined secret
+      # expands to empty and the deploy lands somewhere unintended, or nowhere,
+      # without an error. Fail here instead, before anything is built.
+      - name: Check the deployment secrets exist
+        env:
+          STAGING_SSH_HOST: ${{ secrets.STAGING_SSH_HOST }}
+          STAGING_SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+        run: |
+          missing=""
+          [ -n "$STAGING_SSH_HOST" ] || missing="$missing STAGING_SSH_HOST"
+          [ -n "$STAGING_SSH_USER" ] || missing="$missing STAGING_SSH_USER"
+          [ -n "$STAGING_SSH_KEY" ]  || missing="$missing STAGING_SSH_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::missing secrets:$missing"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Set lowercase image name
+        id: image
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ steps.image.outputs.name }}:develop
+            ghcr.io/${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+          build-args: |
+            VERSION=develop-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Only the files the server needs to run the image: the compose
+      # definition and the config example. Everything else lives in the image.
+      - name: Copy the deployment files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          port: ${{ secrets.STAGING_SSH_PORT || 22 }}
+          source: "docs/examples/docker-compose.server.yml,docs/examples/server.yaml,docs/RUNBOOK-server.md"
+          target: /opt/cortex
+          overwrite: true
+
+      - name: Deploy
+        uses: appleboy/ssh-action@v1
+        env:
+          IMAGE: ghcr.io/${{ steps.image.outputs.name }}:develop
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          port: ${{ secrets.STAGING_SSH_PORT || 22 }}
+          envs: IMAGE
+          script: |
+            set -euo pipefail
+            cd /opt/cortex
+
+            # Credentials are generated once and never regenerated: the
+            # database password is baked into the data directory at initdb, and
+            # rewriting it locks cortex out of its own keys and analyses.
+            if [ ! -f .env ]; then
+              umask 077
+              {
+                echo "CLIENT_ACME_KEY=$(openssl rand -hex 32)"
+                echo "GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 32)"
+                echo "CORTEX_DB_PASSWORD=$(openssl rand -hex 32)"
+                echo "CORTEX_GIT_TOKEN="
+                echo "GITHUB_PUBLISH_TOKEN="
+              } > .env
+              echo "generated .env"
+            fi
+            grep -q '^CORTEX_DB_PASSWORD=' .env || \
+              echo "CORTEX_DB_PASSWORD=$(openssl rand -hex 32)" >> .env
+
+            # The operator's own server.yaml is never overwritten — it carries
+            # client names and tuned limits. The example only seeds a new host.
+            [ -f server.yaml ] || cp docs/examples/server.yaml server.yaml
+
+            # This box also runs the platform; the example's ceiling is most of
+            # its RAM.
+            cat > deploy.compose.yml <<'OVERRIDE'
+            services:
+              cortex:
+                deploy:
+                  resources:
+                    limits:
+                      cpus: "2"
+                      memory: 3G
+            OVERRIDE
+
+            COMPOSE="docker compose -f docs/examples/docker-compose.server.yml -f deploy.compose.yml --project-directory ."
+
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            # The tag is pinned for this deploy rather than left to whatever the
+            # server's .env happens to carry.
+            export CORTEX_IMAGE="$IMAGE"
+            $COMPOSE pull cortex
+            $COMPOSE up -d
+            docker image prune -f
+
+            echo "waiting for the server to answer"
+            for _ in $(seq 30); do
+              curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break
+              sleep 2
+            done
+            curl -fsS http://127.0.0.1:8080/healthz
+
+            # The check that decides whether this is safe to leave running. An
+            # unauthenticated upload must be refused; anything else means the
+            # keys did not load and the endpoint is open.
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              -X POST http://127.0.0.1:8080/api/v1/analyses/upload)
+            if [ "$code" != "401" ]; then
+              echo "::error::an unauthenticated upload returned $code, not 401"
+              exit 1
+            fi
+            echo "deployed: healthy, and refusing unauthenticated uploads"

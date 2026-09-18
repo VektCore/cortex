@@ -13,13 +13,26 @@ server:
   # concurrency is low. Two is a sensible start for a 4-core box.
   workers: 2
 
-  # Where issued API keys live. Empty — the default below — keeps them in
-  # api-keys.json next to the analyses under data_dir, which is what lets a
-  # single binary plus a volume be the whole deployment. Point it at PostgreSQL
-  # when several instances share one key table, or when credentials have to be
-  # auditable with a query instead of by reading JSON off a disk. Cortex applies
-  # its own schema on connect, so there is no migration to run first.
-  # database: postgres://cortex:${PGPASSWORD}@db:5432/cortex?sslmode=require
+  # Where issued API keys, analyses and their SARIF live. Empty keeps them in
+  # files under data_dir, which is what lets a single binary plus a volume be
+  # the whole deployment; set it and they go to PostgreSQL, which is what you
+  # want when several instances share one key table, or when credentials have
+  # to be auditable with a query instead of by reading JSON off a disk.
+  #
+  # Cortex applies its own schema on connect and the statements are
+  # CREATE ... IF NOT EXISTS, so a fresh database needs to exist and nothing
+  # needs to be run in it. There is no migration step and no Alembic here.
+  #
+  # The host is the compose service name in docker-compose.server.yml, resolved
+  # on the compose network — the database publishes no port on the host.
+  # sslmode=disable because the stock postgres image serves no TLS and this
+  # connection never leaves the Docker bridge; asking for `require` against it
+  # just fails to connect. Change both ends together if you terminate TLS.
+  #
+  # The password is read from the environment, so it stays out of this file
+  # even though this file already holds the static keys. deploy-server.sh
+  # generates it into .env as a hex string, which needs no URL-escaping here.
+  database: postgres://cortex:${CORTEX_DB_PASSWORD}@cortex-db:5432/cortex?sslmode=disable
 
   # Lifetime `cortex keys issue` gives a key when --ttl is not passed. Keys
   # expire by design: a credential that lets its holder upload archives for this

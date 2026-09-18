@@ -8,6 +8,10 @@
 #   docker compose -f docs/examples/docker-compose.server.yml \
 #     --project-directory . up -d
 #
+# By hand you must also write .env yourself: CLIENT_ACME_KEY and
+# CORTEX_DB_PASSWORD have no defaults here, and compose refuses to start
+# without them. deploy-server.sh generates both. See docs/RUNBOOK-server.md.
+#
 # Clients then submit repositories with an API key and never install a scanner:
 #
 #   curl -X POST https://sast.example.com/api/v1/analyses \
@@ -20,7 +24,9 @@
 
 services:
   cortex:
-    image: ghcr.io/vektcore/cortex:latest
+    # Overridable so a deploy can pin the exact tag it just built, instead of
+    # trusting whatever :latest happens to be when the server pulls.
+    image: ${CORTEX_IMAGE:-ghcr.io/vektcore/cortex:latest}
     # Declared alongside the image so both routes work: `pull` uses the
     # published image, `build` produces the same tag locally — which is what you
     # need while the GHCR package is private.
@@ -34,17 +40,34 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
 
+    # Cortex applies its own schema the moment it connects and refuses to start
+    # if it cannot — `serve` returns an error rather than falling back to files,
+    # which is the behaviour you want, but it means starting the two containers
+    # in parallel is a coin flip. Waiting for the database to report healthy
+    # turns that into a deterministic start.
+    depends_on:
+      cortex-db:
+        condition: service_healthy
+
     volumes:
       # The server's own config, with the API keys. Relative to the project
       # directory: ./server.yaml at the repository root, not next to this file.
       - ./server.yaml:/etc/cortex/server.yaml:ro
       # Analyses, their SARIF and every project's tracked history. Without this
       # volume a redeploy forgets everything and every finding looks new again.
+      #
+      # Still needed with the database configured: uploaded archives, the
+      # directories they are expanded into and the per-project reconcile state
+      # stay on disk by design (see server.database in config.go).
       - cortex-data:/var/lib/cortex
       # Read-only SSH key, if you clone private repositories over SSH.
       # - ${HOME}/.ssh/cortex_deploy_key:/root/.ssh/id_ed25519:ro
 
     environment:
+      # Password for the database below. server.yaml reads it out of the
+      # environment as ${CORTEX_DB_PASSWORD} inside the DSN, so the credential
+      # is never written into a config file that gets copied around.
+      - CORTEX_DB_PASSWORD=${CORTEX_DB_PASSWORD:?set CORTEX_DB_PASSWORD in .env}
       # Credentials for cloning private repositories. They live on the server,
       # so clients never send tokens over the API.
       - CORTEX_GIT_TOKEN=${CORTEX_GIT_TOKEN:-}
@@ -79,5 +102,71 @@ services:
           cpus: "4"
           memory: 6G
 
+  # Cortex's own PostgreSQL: issued API keys, the analyses and their SARIF.
+  # Separate from anything else on the box — this host may already be running
+  # an unrelated platform with its own databases, and sharing one instance
+  # between two products means one restart takes both down.
+  cortex-db:
+    # Pinned to the major version the rest of the estate runs (postgres:16), so
+    # there is one Postgres to know how to back up and restore. Not :latest: a
+    # major upgrade that arrives on its own leaves a data directory the new
+    # binary refuses to open, and the container then crash-loops.
+    image: postgres:16-alpine
+    restart: unless-stopped
+
+    # No `ports:` at all — deliberately. Cortex reaches this over the compose
+    # network by service name, so nothing on the host needs a socket, and a
+    # port that is never published cannot be published on the wrong interface.
+    # That is exactly the mistake already recorded on this estate: one platform
+    # database ended up on 0.0.0.0 because it fell out of an override, and
+    # `ufw` does not catch it (Docker's DOCKER-USER chain is evaluated before
+    # INPUT). Use `docker compose exec cortex-db psql` when you need a shell.
+
+    environment:
+      # No inline default for the password. `:?` makes compose refuse to start
+      # when the variable is missing, which is the point: a compose that falls
+      # back to a default is how a documented placeholder ends up being the
+      # real production password. deploy-server.sh generates this into .env.
+      - POSTGRES_PASSWORD=${CORTEX_DB_PASSWORD:?set CORTEX_DB_PASSWORD in .env}
+      # User and database name are literals, not variables with defaults: they
+      # are not secrets, and they have to match the DSN in server.yaml exactly.
+      # Two places that can drift is one place too many.
+      - POSTGRES_USER=cortex
+      - POSTGRES_DB=cortex
+      # initdb only: makes the cluster reject a connection whose password does
+      # not verify, rather than trusting anything arriving over the network.
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+
+    volumes:
+      # Named volume, because the API keys clients are already using and every
+      # analysis ever run live in here. A bind mount would be fine too; an
+      # anonymous volume would not — `docker compose down -v`, or a redeploy
+      # that recreates the container, would hand you a fresh empty database and
+      # every issued key would stop working at once.
+      - cortex-db-data:/var/lib/postgresql/data
+
+    healthcheck:
+      # pg_isready inside the container, so the check does not need a published
+      # port. -U/-d are explicit: without them pg_isready connects as the OS
+      # user and reports a false negative. start_period covers initdb, which
+      # briefly accepts local connections before the cluster is really ready.
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortex"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+    # Modest on purpose: this host is shared, and the working set here is
+    # metadata plus SARIF blobs that Postgres TOASTs out of line and reads only
+    # when asked for. It is not the analysis workload — that is the cortex
+    # container above. Raise it if you keep years of large SARIF and the
+    # listing queries start touching disk.
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+
 volumes:
   cortex-data:
+  cortex-db-data:

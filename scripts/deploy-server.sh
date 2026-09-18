@@ -24,7 +24,7 @@ COMPOSE_FILE="docs/examples/docker-compose.server.yml"
 # Compose resolves relative volume paths against the compose file's directory,
 # which would mount the example config instead of the one this script writes.
 # --project-directory pins them to the repository root.
-COMPOSE=(docker compose -f "docs/examples/docker-compose.server.yml" --project-directory ".")
+COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-directory ".")
 ENV_FILE=".env"
 SERVER_CONFIG="server.yaml"
 DOMAIN=""
@@ -69,16 +69,52 @@ GITHUB_WEBHOOK_SECRET=$(random_secret)
 # Token for cloning private repositories, if you scan any. Needs read access
 # only. Leave empty for public repositories or if you use an SSH deploy key.
 CORTEX_GIT_TOKEN=
+
+# Password for the cortex PostgreSQL container, where the issued API keys and
+# every analysis live. Compose passes it to the database and to cortex, which
+# substitutes it into the DSN in server.yaml.
+#
+# Generated once and never again: the password is baked into the database's
+# data directory at initdb. Regenerating it here would leave the database on
+# the old one and lock cortex out of every key it ever issued. To change it,
+# change it in both places (see docs/RUNBOOK-server.md).
+CORTEX_DB_PASSWORD=$(random_secret)
 EOF
   chmod 600 "$ENV_FILE"
 else
   echo "$ENV_FILE already exists — keeping the current credentials"
+  # A deployment made before cortex had a database has no password in its .env,
+  # and compose now refuses to start without one. Append rather than rewrite:
+  # everything already in that file is a credential somebody is using.
+  if ! grep -q '^CORTEX_DB_PASSWORD=' "$ENV_FILE"; then
+    echo "adding CORTEX_DB_PASSWORD to $ENV_FILE (first run with a database)"
+    {
+      echo
+      echo "# Added by deploy-server.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+      echo "# Password for the cortex PostgreSQL container. Generated once: it is"
+      echo "# baked into the data directory at initdb, so regenerating it would lock"
+      echo "# cortex out of every key it issued."
+      echo "CORTEX_DB_PASSWORD=$(random_secret)"
+    } >> "$ENV_FILE"
+  fi
 fi
 
 if [[ ! -f "$SERVER_CONFIG" ]]; then
   echo "copying docs/examples/server.yaml → $SERVER_CONFIG"
   cp docs/examples/server.yaml "$SERVER_CONFIG"
   sed -i.bak "s/- name: acme/- name: $CLIENT_NAME/" "$SERVER_CONFIG" && rm -f "$SERVER_CONFIG.bak"
+fi
+
+# A config copied before the database existed still has server.database
+# commented out. Compose would start the database and cortex would quietly keep
+# writing files next to it, which looks like it works until the first redeploy.
+if ! grep -qE '^[[:space:]]*database:[[:space:]]*postgres://' "$SERVER_CONFIG"; then
+  echo
+  echo "WARNING: $SERVER_CONFIG has no active server.database."
+  echo "         Cortex will keep its keys and analyses in files under data_dir"
+  echo "         and ignore the database this compose starts. Copy the"
+  echo "         'database:' line from docs/examples/server.yaml."
+  echo
 fi
 
 # ---------------------------------------------------------------------------
@@ -118,7 +154,9 @@ done
 
 if ! curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
   echo
-  echo "the server did not answer on 127.0.0.1:8080. Logs:"
+  echo "the server did not answer on 127.0.0.1:8080."
+  echo "Cortex applies its schema on connect and exits if the database refuses"
+  echo "it, so check cortex-db first. See docs/RUNBOOK-server.md. Logs:"
   "${COMPOSE[@]}" logs --tail=40
   exit 1
 fi
@@ -180,7 +218,23 @@ Cortex is listening on 127.0.0.1:8080. It is NOT exposed yet.
      cortex keys list            what exists, and when each one ends
      cortex keys revoke <id>     stop one now, without a restart
 
-The client key and webhook secret above are in .env. Treat that file as a
-credential store: chmod 600, no backups to shared drives.
+5. Back the database up. Those issued keys and every analysis now live in the
+   cortex-db container, in the named volume ${PWD##*/}_cortex-db-data. It
+   publishes no port — reach it through compose:
+
+     docker compose -f $COMPOSE_FILE --project-directory . \\
+       exec -T cortex-db pg_dump -U cortex -d cortex --format=custom \\
+       > cortex-\$(date -u +%Y%m%d).dump
+
+   Put that on a schedule somewhere off this host. A lost volume is every
+   client key revoked at once, and there is no way to re-issue the same secret.
+
+The client key, webhook secret and database password above are in .env. Treat
+that file as a credential store: chmod 600, no backups to shared drives. The
+database password in particular is baked into the volume at first start —
+editing .env alone will lock cortex out.
+
+Restoring, rotating that password, and what to check when cortex cannot reach
+the database: docs/RUNBOOK-server.md
 ───────────────────────────────────────────────────────────────
 EOF
