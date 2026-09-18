@@ -76,7 +76,11 @@ runs:
       env:
         # Everything travels by environment, never interpolated into the script:
         # an input expanded inline lands in the runner log verbatim, and one of
-        # these is a credential.
+        # these is a credential. That argument is about the log and covers only
+        # the log: an environment variable is still exposed the moment it is
+        # expanded into a command's arguments, where anyone who can run ps on
+        # the runner reads it. The key therefore reaches curl through a config
+        # file on stdin — see cortex_curl below.
         CORTEX_URL: ${{ inputs.server-url }}
         CORTEX_KEY: ${{ inputs.api-key }}
         CORTEX_PROJECT: ${{ inputs.project }}
@@ -91,6 +95,38 @@ runs:
         archive="$RUNNER_TEMP/cortex-src.zip"
         body="$RUNNER_TEMP/cortex-response.json"
 
+        # curl's config-file parser treats a quoted value as C-ish: a backslash
+        # or a double quote in the key has to survive it, or the header carries
+        # a different credential and the server answers 401 with no hint why.
+        # Escaped once here rather than at every call site.
+        key_escaped="${CORTEX_KEY//\\/\\\\}"
+        key_escaped="${key_escaped//\"/\\\"}"
+        # Nothing below needs the raw value, and a variable still in the
+        # environment is inherited by every child — curl, git, jq, zip. On a
+        # shared self-hosted runner /proc/<pid>/environ is same-uid readable,
+        # and those jobs run as one user.
+        unset CORTEX_KEY
+
+        # Anything the server said is untrusted text on its way into a log.
+        # A newline lets it emit its own ::workflow-command:: — ::stop-commands::
+        # in particular switches off command processing for the rest of the
+        # step — so newlines and carriage returns are flattened before any
+        # response text is echoed.
+        one_line() { tr '\r\n' '  ' | cut -c1-500; }
+
+        # Every authenticated call goes through here. The credential is written
+        # on curl's stdin as a config file, so it never appears in this
+        # process's argv: a self-hosted runner is shared, and -H "Authorization:
+        # Bearer $CORTEX_KEY" hands the key to every `ps` on the host for the
+        # life of the request. Only the *quoted* form is honoured — curl
+        # silently ignores `header = Authorization: …` without the quotes, and
+        # the request then goes out unauthenticated. Same approach as
+        # scripts/smoke.sh in this repository; keep the two in step.
+        cortex_curl() {
+          printf 'header = "Authorization: Bearer %s"\n' "$key_escaped" \
+            | curl -sS --config - "$@"
+        }
+
         # git archive respects .gitignore and carries no .git directory, so the
         # server receives the tracked tree and nothing else — no build output,
         # no local credentials, no history.
@@ -100,9 +136,8 @@ runs:
         fi
         echo "packaged $(du -h "$archive" | cut -f1) from $GITHUB_SHA"
 
-        code=$(curl -sS -o "$body" -w '%{http_code}' \
+        code=$(cortex_curl -o "$body" -w '%{http_code}' \
           -X POST "$server/api/v1/analyses/upload" \
-          -H "Authorization: Bearer $CORTEX_KEY" \
           -F "archive=@$archive" \
           -F "project=$CORTEX_PROJECT" \
           -F "commit=$GITHUB_SHA" \
@@ -111,7 +146,7 @@ runs:
 
         if [ "$code" != "202" ]; then
           echo "::error::the server refused the upload (HTTP $code)"
-          jq -r '.error // .' < "$body" 2>/dev/null || cat "$body"
+          { jq -r '.error // .' < "$body" 2>/dev/null || cat "$body"; } | one_line
           exit 1
         fi
 
@@ -123,8 +158,7 @@ runs:
         status=""
         while [ "$(date +%s)" -lt "$deadline" ]; do
           sleep "$CORTEX_INTERVAL"
-          code=$(curl -sS -o "$body" -w '%{http_code}' \
-            -H "Authorization: Bearer $CORTEX_KEY" \
+          code=$(cortex_curl -o "$body" -w '%{http_code}' \
             "$server/api/v1/analyses/$id")
           if [ "$code" != "200" ]; then
             echo "::warning::status check returned HTTP $code; retrying"
@@ -140,7 +174,8 @@ runs:
           exit 1
         fi
         if [ "$status" = "failed" ]; then
-          echo "::error::the analysis failed: $(jq -r '.error // "no reason given"' < "$body")"
+          reason=$(jq -r '.error // "no reason given"' < "$body" | one_line)
+          echo "::error::the analysis failed: $reason"
           exit 1
         fi
 
@@ -155,10 +190,20 @@ runs:
 
         # The findings report comes back whatever the verdict: a passing build
         # still has to show what was found.
-        curl -sS -o "$RUNNER_TEMP/cortex.sarif" \
-          -H "Authorization: Bearer $CORTEX_KEY" \
-          "$server/api/v1/analyses/$id/sarif" || true
-        echo "sarif=$RUNNER_TEMP/cortex.sarif" >> "$GITHUB_OUTPUT"
+        #
+        # The status is checked rather than ignored. Without it a 401 or 500
+        # writes its JSON error body to cortex.sarif, which is then handed to
+        # upload-sarif and published to Code Scanning as if it were findings —
+        # quietly, because that step tolerates failure.
+        sarif="$RUNNER_TEMP/cortex.sarif"
+        code=$(cortex_curl -o "$sarif" -w '%{http_code}' \
+          "$server/api/v1/analyses/$id/sarif") || code=000
+        if [ "$code" = "200" ]; then
+          echo "sarif=$sarif" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::could not download the SARIF (HTTP $code); the verdict below still stands"
+          rm -f "$sarif"
+        fi
 
         if [ "$CORTEX_GATE_ON" = "new" ]; then
           [ "$new" -eq 0 ] && passed=true || passed=false
