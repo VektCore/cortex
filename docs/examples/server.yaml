@@ -91,6 +91,20 @@ server:
     public_url: https://sast.example.com
     # api_url: https://github.example.com/api/v3   # GitHub Enterprise Server
 
+# Two scanners reporting the same weakness at the same line count once, and
+# the agreement is recorded rather than discarded — tools that concur are a
+# confidence signal. Only findings carrying a CWE are grouped: without one
+# there is no evidence that two different rules describe the same thing, and
+# guessing would drop real findings.
+#
+# Off by default because it only pays where scanners overlap on one language
+# (Semgrep and Bandit on Python, Semgrep and gosec on Go). On a service that
+# takes any client's repository, that overlap is the normal case rather than
+# the exception. It does nothing when the engines cover disjoint ground —
+# code, secrets and dependencies never land on the same line.
+dedup:
+  cross_scanner: true
+
 # Third-party code is not what the client is paying to have reviewed.
 exclude:
   - node_modules/

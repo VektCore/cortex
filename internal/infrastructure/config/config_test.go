@@ -194,3 +194,22 @@ publishers:
 	require.NoError(t, err)
 	assert.Equal(t, "pa$$word-with-dollars", cfg.Publishers.KorvLabs.APIKey)
 }
+
+// The example server config is what an operator copies to stand a deployment
+// up, and its comments make claims about behaviour. A claim in a comment that
+// the file does not actually produce is worse than no comment: it is believed.
+func TestExampleServerConfig_MeansWhatItSays(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Load("../../../docs/examples/server.yaml")
+	require.NoError(t, err)
+
+	assert.True(t, cfg.CrossScannerDedup(),
+		"the file enables dedup.cross_scanner and explains why; the loader has to see it")
+	assert.True(t, cfg.Server.Upload.Enabled,
+		"the upload endpoint is what the archive flow depends on")
+	assert.Positive(t, cfg.Server.Upload.MaxEntries,
+		"a non-positive ceiling is refused at load, so this proves the block parses")
+	assert.NotEmpty(t, cfg.Server.Database,
+		"the deployment this file describes keeps its state in postgres")
+}
