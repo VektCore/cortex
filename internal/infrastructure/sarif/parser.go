@@ -226,6 +226,9 @@ func parseResult(
 		CWE:         cwe,
 		Fingerprint: storedFingerprint(result),
 		SymbolName:  stringPropertyOr(result.Properties, SymbolProperty),
+		// Present only for dependency advisories, and the thing that lets one
+		// CVE reported against two committed lockfiles be one finding.
+		Package: extractPackage(result, scannerName),
 		Reachability: finding.ParseReachability(
 			stringPropertyOr(result.Properties, ReachabilityProperty)),
 	}).Get()

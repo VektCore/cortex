@@ -89,7 +89,7 @@ rules:
 
       # 2. A method call on a symbol imported from a real HTTP client module.
       - patterns:
-          - pattern-either: &http-client-import
+          - pattern-either:
               # axios
               - pattern-inside: |
                   import $CLIENT from 'axios'
@@ -188,7 +188,86 @@ rules:
       #      const client = axios.create({ baseURL });
       #    Still gated on $CLIENT being a real imported HTTP client.
       - patterns:
-          - pattern-either: *http-client-import
+          - pattern-either:
+              # axios
+              - pattern-inside: |
+                  import $CLIENT from 'axios'
+                  ...
+              - pattern-inside: |
+                  import * as $CLIENT from 'axios'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('axios')
+                  ...
+              # node core http / https (bare and node: specifier)
+              - pattern-inside: |
+                  import $CLIENT from 'http'
+                  ...
+              - pattern-inside: |
+                  import * as $CLIENT from 'http'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('http')
+                  ...
+              - pattern-inside: |
+                  import $CLIENT from 'https'
+                  ...
+              - pattern-inside: |
+                  import * as $CLIENT from 'https'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('https')
+                  ...
+              - pattern-inside: |
+                  import $CLIENT from 'node:http'
+                  ...
+              - pattern-inside: |
+                  import * as $CLIENT from 'node:http'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('node:http')
+                  ...
+              - pattern-inside: |
+                  import $CLIENT from 'node:https'
+                  ...
+              - pattern-inside: |
+                  import * as $CLIENT from 'node:https'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('node:https')
+                  ...
+              # the `request` package — the name that caused the most noise
+              - pattern-inside: |
+                  import $CLIENT from 'request'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('request')
+                  ...
+              # other common server-side clients
+              - pattern-inside: |
+                  import $CLIENT from 'got'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('got')
+                  ...
+              - pattern-inside: |
+                  import $CLIENT from 'node-fetch'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('node-fetch')
+                  ...
+              - pattern-inside: |
+                  import $CLIENT from 'superagent'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('superagent')
+                  ...
+              - pattern-inside: |
+                  import * as $CLIENT from 'undici'
+                  ...
+              - pattern-inside: |
+                  const $CLIENT = require('undici')
+                  ...
           - pattern-inside: |
               const $C = <... $CLIENT ...>;
               ...

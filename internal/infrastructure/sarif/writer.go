@@ -79,6 +79,7 @@ func writeBytes(findings []finding.Finding, meta ports.SarifMetadata) ([]byte, e
 		if f.Reachability() != finding.ReachabilityUnknown {
 			result.Properties[ReachabilityProperty] = f.Reachability().String()
 		}
+		writePackage(result, f)
 
 		loc := f.Location()
 		region := gosarif.NewRegion().
@@ -155,4 +156,24 @@ func shortDescription(f finding.Finding) string {
 		return f.RuleID().String()
 	}
 	return text
+}
+
+// writePackage records which package a dependency advisory is about.
+//
+// Without it a dependency finding reloaded from a document Cortex wrote stops
+// being recognised as one, and its identity falls back to the lockfile it was
+// noticed in — which is the bug the dependency fingerprint exists to fix.
+func writePackage(result *gosarif.Result, f finding.Finding) {
+	pkg, ok := f.Package().Get()
+	if !ok {
+		return
+	}
+
+	result.Properties[PackageNameProperty] = pkg.Name()
+	if eco := pkg.Ecosystem(); eco != "" {
+		result.Properties[PackageEcosystemProperty] = eco
+	}
+	if ver := pkg.Version(); ver != "" {
+		result.Properties[PackageVersionProperty] = ver
+	}
 }
