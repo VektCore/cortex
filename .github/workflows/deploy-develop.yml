@@ -126,9 +126,28 @@ jobs:
             grep -q '^CORTEX_DB_PASSWORD=' .env || \
               echo "CORTEX_DB_PASSWORD=$(openssl rand -hex 32)" >> .env
 
-            # The operator's own server.yaml is never overwritten — it carries
-            # client names and tuned limits. The example only seeds a new host.
-            [ -f server.yaml ] || cp docs/examples/server.yaml server.yaml
+            # Configuration travels with the code, so a change in the repo
+            # actually reaches the server. It used to only seed a new host,
+            # which meant every later edit to the example landed in
+            # docs/examples/ and nowhere that runs — deployed, and inert.
+            #
+            # The marker is what was last shipped. If the live file matches it,
+            # nobody edited on the box and it is safe to replace. If it does
+            # not, somebody did: keep their file, say so, and let a human
+            # reconcile. Silently clobbering an operator's edit during an
+            # incident is how a server comes back configured wrong.
+            if [ ! -f server.yaml ]; then
+              cp docs/examples/server.yaml server.yaml
+              cp docs/examples/server.yaml .server.yaml.deployed
+              echo "server.yaml created from the example"
+            elif [ -f .server.yaml.deployed ] && cmp -s server.yaml .server.yaml.deployed; then
+              cp docs/examples/server.yaml server.yaml
+              cp docs/examples/server.yaml .server.yaml.deployed
+              echo "server.yaml updated from the example"
+            else
+              echo "::warning::server.yaml differs from what was last deployed; \
+              keeping it. Reconcile it with docs/examples/server.yaml by hand."
+            fi
 
             # This box also runs the platform; the example's ceiling is most of
             # its RAM.
