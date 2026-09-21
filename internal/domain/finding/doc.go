@@ -5,7 +5,10 @@
 // mapping.
 //
 // Aggregate root: Finding
-// Value Objects:  Severity, CWE, OWASP, Location, RuleID, Fingerprint, Message
+// Value Objects:  Severity, CWE, OWASP, Location, RuleID, Fingerprint, Message,
+//
+//	Package
+//
 // Domain Events:  Detected, FindingDeduplicated, Suppressed
 //
 // Invariants enforced here:
@@ -13,5 +16,8 @@
 //   - Fingerprint is a deterministic hash of (RuleID, file, startLine,
 //     normalized snippet) — two findings with the same fingerprint are
 //     duplicates by definition.
+//   - A finding that carries a Package is a dependency finding, and is
+//     identified by (advisory, ecosystem, package) instead: the manifest it was
+//     noticed in is not part of what it is.
 //   - A Finding cannot exist without a Location and a Severity.
 package finding

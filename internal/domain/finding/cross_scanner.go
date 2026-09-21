@@ -13,7 +13,14 @@ type CrossScannerResult struct {
 
 // crossKey identifies "the same weakness at the same place", independently of
 // which rule of which tool found it.
+//
+// dep is set instead for a dependency finding: every advisory in a lockfile is
+// reported at the same file and line, so grouping those by CWE and position
+// would merge unrelated CVEs into one. The advisory + package key is both
+// correct there and the thing that lets osv-scanner and Trivy corroborate each
+// other on the same advisory.
 type crossKey struct {
+	dep       Fingerprint
 	cwe       CWE
 	file      string
 	startLine int
@@ -43,13 +50,11 @@ func DeduplicateCrossScanner(findings []Finding) CrossScannerResult {
 	passthrough := make([]Finding, 0)
 
 	for _, f := range findings {
-		cwe, ok := f.cwe.Get()
+		k, ok := groupKey(f)
 		if !ok {
 			passthrough = append(passthrough, f)
 			continue
 		}
-
-		k := crossKey{cwe: cwe, file: f.location.File(), startLine: f.location.StartLine()}
 
 		if _, seen := best[k]; !seen {
 			best[k] = f
@@ -75,4 +80,23 @@ func DeduplicateCrossScanner(findings []Finding) CrossScannerResult {
 	out = append(out, passthrough...)
 
 	return CrossScannerResult{Findings: out, Corroborated: corroborated}
+}
+
+// groupKey returns the key a finding is collapsed under, and whether it can be
+// grouped at all. A dependency finding groups by advisory + package; anything
+// else needs a CWE, without which there is no evidence that two different rules
+// describe the same weakness.
+func groupKey(f Finding) (crossKey, bool) {
+	if dep := f.dependencyFingerprint(); !dep.Empty() {
+		return crossKey{dep: dep}, true
+	}
+	cwe, ok := f.cwe.Get()
+	if !ok {
+		return crossKey{}, false
+	}
+	return crossKey{
+		cwe:       cwe,
+		file:      f.location.File(),
+		startLine: f.location.StartLine(),
+	}, true
 }

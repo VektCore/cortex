@@ -27,6 +27,9 @@ type Finding struct {
 	message      Message
 	source       ScannerName
 	languages    []shared.Language
+	// pkg is the vulnerable dependency, present only on software-composition
+	// findings. Its presence is what makes a finding "a dependency finding".
+	pkg mo.Option[Package]
 	// snippet is kept only to recompute the fingerprint when the location
 	// changes (path normalization). It is never exposed.
 	snippet string
@@ -45,6 +48,10 @@ type NewFindingInput struct {
 	CWE       mo.Option[CWE]
 	OWASP     mo.Option[OWASP]
 	Languages []shared.Language
+	// Package, when present, marks this as a dependency finding and switches
+	// its identity to the advisory + package key. Build it with NewPackage;
+	// leaving it None keeps the location-based identities unchanged.
+	Package mo.Option[Package]
 	// Fingerprint, when set, is used as-is instead of being recomputed. Only
 	// for reconstructing a finding that Cortex itself serialized: the snippet
 	// is not part of that document, so recomputing would produce a different
@@ -79,18 +86,7 @@ func New(in NewFindingInput) mo.Result[Finding] {
 		return shared.Err[Finding](shared.NewDomainError(
 			"FINDING_NO_SOURCE", "source (scanner) is required"))
 	}
-	fp := in.Fingerprint
-	if fp == "" {
-		fp = NewFingerprint(in.RuleID, in.Location, in.Snippet)
-	}
-	content := in.Content
-	if content == "" {
-		content = NewContentFingerprint(in.RuleID, in.Location, in.Snippet)
-	}
-	symbolFP := in.Symbol
-	if symbolFP == "" {
-		symbolFP = NewSymbolFingerprint(in.RuleID, in.SymbolName, in.Snippet)
-	}
+	fp, content, symbolFP := identities(in)
 	return shared.Ok(Finding{
 		fingerprint:  fp,
 		content:      content,
@@ -105,8 +101,48 @@ func New(in NewFindingInput) mo.Result[Finding] {
 		message:      in.Message,
 		source:       in.Source,
 		languages:    append([]shared.Language(nil), in.Languages...),
+		pkg:          in.Package,
 		snippet:      in.Snippet,
 	})
+}
+
+// identities computes the three fingerprints, honouring any the caller already
+// supplied (a finding reconstructed from a document Cortex wrote carries them
+// and must not be re-identified).
+//
+// A dependency finding is keyed on the advisory and the package at all three
+// levels. The cascade exists to follow code through edits — lines moving, a
+// function changing file — and none of that applies to a lockfile entry, so
+// collapsing the levels costs nothing and keeps whichever level a consumer
+// reads pointing at the same vulnerable dependency.
+//
+// The fallback is always the existing behaviour: no package identity, or one
+// too incomplete to hash, and the location-based fingerprints are used
+// unchanged. This can only ever merge duplicates, never split them.
+func identities(in NewFindingInput) (exact, content, symbol Fingerprint) {
+	if dep := dependencyKey(in.RuleID, in.Package); !dep.Empty() {
+		return orElse(in.Fingerprint, dep), orElse(in.Content, dep), orElse(in.Symbol, dep)
+	}
+	return orElse(in.Fingerprint, NewFingerprint(in.RuleID, in.Location, in.Snippet)),
+		orElse(in.Content, NewContentFingerprint(in.RuleID, in.Location, in.Snippet)),
+		orElse(in.Symbol, NewSymbolFingerprint(in.RuleID, in.SymbolName, in.Snippet))
+}
+
+// dependencyKey is the dependency fingerprint for a finding that carries a
+// package, and "" for every other finding.
+func dependencyKey(rule RuleID, pkg mo.Option[Package]) Fingerprint {
+	p, ok := pkg.Get()
+	if !ok {
+		return ""
+	}
+	return NewDependencyFingerprint(rule, p)
+}
+
+func orElse(supplied, computed Fingerprint) Fingerprint {
+	if supplied != "" {
+		return supplied
+	}
+	return computed
 }
 
 // Accessors. All return value types — no internal slice is ever exposed
@@ -124,7 +160,21 @@ func (f Finding) OWASP() mo.Option[OWASP]         { return f.owasp }
 func (f Finding) Location() Location              { return f.location }
 func (f Finding) Message() Message                { return f.message }
 func (f Finding) Source() ScannerName             { return f.source }
+func (f Finding) Package() mo.Option[Package]     { return f.pkg }
 func (f Finding) Languages() []shared.Language    { return append([]shared.Language(nil), f.languages...) }
+
+// IsDependency reports whether this is a software-composition finding — one
+// about a package rather than about code — which is what decides that its
+// identity is the advisory and the package instead of a file and a line.
+func (f Finding) IsDependency() bool {
+	return !f.dependencyFingerprint().Empty()
+}
+
+// dependencyFingerprint recomputes the dependency identity from the finding's
+// own fields, or returns "" for a code finding.
+func (f Finding) dependencyFingerprint() Fingerprint {
+	return dependencyKey(f.ruleID, f.pkg)
+}
 
 // HasCWE reports whether a given CWE is associated with the finding.
 func (f Finding) HasCWE(c CWE) bool {

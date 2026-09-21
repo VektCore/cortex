@@ -204,8 +204,9 @@ func TestExampleServerConfig_MeansWhatItSays(t *testing.T) {
 	cfg, err := config.Load("../../../docs/examples/server.yaml")
 	require.NoError(t, err)
 
-	assert.True(t, cfg.CrossScannerDedup(),
-		"the file enables dedup.cross_scanner and explains why; the loader has to see it")
+	assert.False(t, cfg.CrossScannerDedup(),
+		"disabled deliberately: grouping by (CWE, file, line) merges distinct "+
+			"advisories that share a CWE on one lockfile line")
 	assert.True(t, cfg.Server.Upload.Enabled,
 		"the upload endpoint is what the archive flow depends on")
 	assert.Positive(t, cfg.Server.Upload.MaxEntries,

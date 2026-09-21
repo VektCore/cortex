@@ -102,8 +102,16 @@ server:
 # takes any client's repository, that overlap is the normal case rather than
 # the exception. It does nothing when the engines cover disjoint ground —
 # code, secrets and dependencies never land on the same line.
+# DISABLED until the dependency grouping lands. Grouping is by
+# (CWE, file, start line), and every dependency advisory sits at
+# <lockfile>:1 — so six distinct prototype-pollution CVEs sharing CWE-1321 on
+# one lockfile line collapse into one finding and five vanish. Measured on a
+# real repository: two groups, six advisories each, silently lost.
+#
+# Re-enable once findings from a lockfile are grouped by the advisory and the
+# package rather than by the line they were noticed on.
 dedup:
-  cross_scanner: true
+  cross_scanner: false
 
 # Third-party code is not what the client is paying to have reviewed.
 exclude:

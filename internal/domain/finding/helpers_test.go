@@ -47,3 +47,14 @@ func withSnippet(s string) func(*finding.NewFindingInput) {
 func withSource(s finding.ScannerName) func(*finding.NewFindingInput) {
 	return func(in *finding.NewFindingInput) { in.Source = s }
 }
+
+// withPackage marks the built finding as a dependency finding.
+func withPackage(pkg finding.PackageInput) func(*finding.NewFindingInput) {
+	return func(in *finding.NewFindingInput) {
+		in.Package = finding.NewPackage(pkg)
+	}
+}
+
+func withRule(id finding.RuleID) func(*finding.NewFindingInput) {
+	return func(in *finding.NewFindingInput) { in.RuleID = id }
+}

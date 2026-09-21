@@ -34,6 +34,12 @@ func (f Finding) WithSeverity(s shared.Severity) Finding {
 func (f Finding) WithLocation(loc Location) Finding {
 	out := f
 	out.location = loc
+	// A dependency finding is identified by the advisory and the package, not
+	// by the manifest it was noticed in, so normalizing that path must leave
+	// its identity alone — otherwise Relativize would undo the collapse.
+	if f.IsDependency() {
+		return out
+	}
 	out.fingerprint = NewFingerprint(f.ruleID, loc, f.snippet)
 	out.content = NewContentFingerprint(f.ruleID, loc, f.snippet)
 	return out
@@ -60,6 +66,11 @@ func (f Finding) WithMessage(m Message) Finding {
 func (f Finding) WithSymbol(symbol string) Finding {
 	out := f
 	out.symbolName = symbol
+	// Same reason as WithLocation: there is no enclosing function in a lockfile,
+	// so a symbol resolver that guessed one must not re-identify the package.
+	if f.IsDependency() {
+		return out
+	}
 	out.symbol = NewSymbolFingerprint(f.ruleID, symbol, f.snippet)
 	return out
 }
