@@ -20,6 +20,7 @@ import (
 	"github.com/vektcore/cortex/internal/infrastructure/archive"
 	"github.com/vektcore/cortex/internal/infrastructure/config"
 	gitinfra "github.com/vektcore/cortex/internal/infrastructure/git"
+	"github.com/vektcore/cortex/internal/infrastructure/projectprofile"
 	ghpublish "github.com/vektcore/cortex/internal/infrastructure/publishers/github_code_scanning"
 	platformpublish "github.com/vektcore/cortex/internal/infrastructure/publishers/vektcore_platform"
 )
@@ -311,11 +312,22 @@ func (r *Runner) execute(ctx context.Context, analysis *Analysis) error {
 
 	codec := bootstrap.Codec()
 
+	// The client's repository declares which of its own directories are not
+	// compiled or not shipped; that adds to the operator's exclude list rather
+	// than replacing it. Logged with its authority, because a scan that skips
+	// a third of a repository should say so rather than just return a smaller
+	// number.
+	profile := projectprofile.Load(ctx, dir)
+	if len(profile.Exclusions) > 0 {
+		r.logger.Info("paths excluded by the project's own declarations",
+			ports.F("id", analysis.ID), ports.F("detail", profile.Explain()))
+	}
+
 	scanResp, scanErr := bootstrap.ExecuteScan(r.cfg, codec, r.logger).
 		Execute(ctx, dto.ExecuteScanRequest{
 			TargetPath:   dir,
 			Settings:     r.cfg.ScannerSettings(),
-			Exclude:      r.cfg.ExcludePatterns(),
+			Exclude:      profile.ComposeWith(r.cfg.ExcludePatterns()),
 			Escalations:  r.escalations(),
 			Reachability: r.cfg.ReachabilitySettings(),
 		}).Get()

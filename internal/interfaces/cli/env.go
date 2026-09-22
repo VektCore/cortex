@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -11,6 +12,7 @@ import (
 	"github.com/vektcore/cortex/internal/domain/gate"
 	"github.com/vektcore/cortex/internal/domain/shared"
 	"github.com/vektcore/cortex/internal/infrastructure/config"
+	"github.com/vektcore/cortex/internal/infrastructure/projectprofile"
 )
 
 // cmdEnv is what almost every command needs before it can do anything: the
@@ -58,13 +60,31 @@ func (e cmdEnv) policy() (gate.Policy, error) {
 // scanRequest assembles the ExecuteScan input from configuration, so scan,
 // pipeline and baseline cannot drift apart in what they enable.
 func (e cmdEnv) scanRequest(targetPath string) dto.ExecuteScanRequest {
+	// What the repository declares about itself adds to the operator's list,
+	// never replaces it: tsconfig saying a directory is not compiled is
+	// evidence nothing under it ships, and reading it is cheaper and more
+	// accurate than asking every client to configure the same thing by hand.
+	profile := projectprofile.Load(context.Background(), targetPath)
+	e.explainProfile(profile)
+
 	return dto.ExecuteScanRequest{
 		TargetPath:   targetPath,
 		Settings:     e.cfg.ScannerSettings(),
-		Exclude:      e.cfg.ExcludePatterns(),
+		Exclude:      profile.ComposeWith(e.cfg.ExcludePatterns()),
 		Escalations:  e.escalations,
 		Reachability: e.cfg.ReachabilitySettings(),
 	}
+}
+
+// explainProfile puts the skipped paths and their authority in the log. A
+// silent exclusion is indistinguishable from a scan that quietly missed
+// something, and the difference matters when the count drops.
+func (e cmdEnv) explainProfile(profile projectprofile.Profile) {
+	if len(profile.Exclusions) == 0 {
+		return
+	}
+	e.logger.Info("paths excluded by the project's own declarations",
+		ports.F("detail", profile.Explain()))
 }
 
 // firstArgOr returns the first positional argument, or a default.
